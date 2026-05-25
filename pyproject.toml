@@ -1,0 +1,11 @@
+[project]
+name = "hozbot"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "imapclient==3.0.1",
+    "pydantic-ai==1.0.0",
+    "python-dotenv==1.0.1",
+    "python-telegram-bot==21.10",
+]
