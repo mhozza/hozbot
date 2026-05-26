@@ -4,6 +4,7 @@ from email.header import decode_header
 from html.parser import HTMLParser
 from imapclient import IMAPClient
 from dotenv import load_dotenv
+from typing import Any
 
 class HTMLTextExtractor(HTMLParser):
     def __init__(self):
@@ -39,7 +40,7 @@ def decode_mime_header(header_value: str) -> str:
             result.append(str(part))
     return "".join(result)
 
-def fetch_unread_emails() -> list[dict[str, str]]:
+def fetch_unread_emails() -> list[dict[str, Any]]:
     load_dotenv()
     
     imap_server = os.getenv("EMAIL_IMAP_SERVER")
@@ -119,6 +120,7 @@ def fetch_unread_emails() -> list[dict[str, str]]:
             body_cleaned = " ".join(body.split())
             
             emails_data.append({
+                "uid": str(msg_id),
                 "sender": sender,
                 "subject": subject,
                 "body_snippet": body_cleaned,
@@ -126,6 +128,48 @@ def fetch_unread_emails() -> list[dict[str, str]]:
             })
             
     return emails_data
+
+def fetch_attachment_content_by_uid(uid: str, filename: str) -> bytes | None:
+    """Fetch a specific attachment payload from an email identified by its IMAP UID."""
+    load_dotenv()
+    imap_server = os.getenv("EMAIL_IMAP_SERVER")
+    email_address = os.getenv("EMAIL_ADDRESS")
+    email_password = os.getenv("EMAIL_APP_PASSWORD")
+    if not all([imap_server, email_address, email_password]):
+        raise ValueError("Missing IMAP environment configuration.")
+    with IMAPClient(imap_server, ssl=True) as client:
+        client.login(email_address, email_password)
+        client.select_folder("INBOX", readonly=True)
+        resp = client.uid_fetch(uid, ["RFC822"])
+        if not resp or uid not in resp:
+            return None
+        raw_email = resp[uid][b"RFC822"]
+        msg = email.message_from_bytes(raw_email)
+        for part in msg.walk():
+            if part.get_filename():
+                fname = decode_mime_header(part.get_filename())
+                if fname == filename:
+                    return part.get_payload(decode=True)
+    return None
+
+def extract_pdf_text(pdf_bytes: bytes, max_pages: int = 5, max_chars: int = 4000) -> str:
+    """Extract text from PDF bytes, limited to first `max_pages` and `max_chars` characters."""
+    from io import BytesIO
+    from pypdf import PdfReader
+
+    reader = PdfReader(BytesIO(pdf_bytes))
+    text_parts = []
+    for i, page in enumerate(reader.pages):
+        if i >= max_pages:
+            break
+        try:
+            txt = page.extract_text()
+            if txt:
+                text_parts.append(txt)
+        except Exception:
+            continue
+    full_text = " ".join(text_parts)
+    return full_text[:max_chars]
 
 if __name__ == "__main__":
     # Simple self-test code when run directly

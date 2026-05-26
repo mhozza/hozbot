@@ -75,6 +75,45 @@ def check_shared_inbox(ctx: RunContext[FamilySystemContext]) -> str:
         logger.error(f"Error in check_shared_inbox tool: {e}", exc_info=True)
         return f"Error retrieving emails: {str(e)}"
 
+from database import read_profile, write_profile, append_fact, read_calendar, add_event, mark_event_sent
+
+@agent.tool
+def get_profile(ctx: RunContext[FamilySystemContext]) -> str:
+    """Return the family profile JSON as a formatted string."""
+    profile = read_profile()
+    return json.dumps(profile, indent=2)
+
+@agent.tool
+def add_fact_tool(note: str) -> str:
+    """Add a critical note to the family profile."""
+    append_fact(note)
+    return "Fact added to profile."
+
+@agent.tool
+def get_calendar(ctx: RunContext[FamilySystemContext]) -> str:
+    """Return the list of upcoming calendar events."""
+    events = read_calendar()
+    if not events:
+        return "No events scheduled."
+    lines = []
+    for ev in events:
+        lines.append(f"- {ev.get('title')} at {ev.get('timestamp')} (sent: {ev.get('reminder_sent')})")
+    return "\n".join(lines)
+
+@agent.tool
+def add_calendar_event(title: str, timestamp_iso: str) -> str:
+    """Add a new event to the calendar and return its ID."""
+    event = add_event(title, timestamp_iso)
+    return f"Event added with ID {event.get('id')}"
+
+@agent.tool
+def mark_event_sent_tool(event_id: str) -> str:
+    """Mark the calendar event as reminder sent."""
+    mark_event_sent(event_id)
+    return f"Event {event_id} marked as reminder sent."
+
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Strict ID whitelist check - drop unauthorized traffic silently
     if not update.effective_user or update.effective_user.id not in ALLOWED_USER_IDS:
