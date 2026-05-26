@@ -12,7 +12,7 @@ from pydantic_ai import Agent, RunContext
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import agent_email
-
+from pydantic_ai.capabilities import Thinking
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -36,9 +36,19 @@ class FamilySystemContext:
     last_name: str | None
 
 # Initialize PydanticAI Agent with "Chief of Staff" corporate persona
+from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.providers.google import GoogleProvider
+
+# Initialize Google provider with API key from environment
+google_provider = GoogleProvider(api_key=os.getenv("GOOGLE_API_KEY"))
+# Create GoogleModel instance for Gemini 3.5 flash
+google_model = GoogleModel('gemini-3.5-flash', provider=google_provider)
+
+# Initialize PydanticAI Agent with GoogleModel instance
 agent = Agent(
-    'gemini:gemini-3.5-flash',
+    google_model,
     deps_type=FamilySystemContext,
+    capabilities=[Thinking(effort='low')],
     system_prompt=(
         "You are a Family Office Chief of Staff AI Agent. "
         "Your objective is to assist authorized family members with their requests, "
@@ -96,11 +106,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         # Run the agent asynchronously
+        # Run the agent asynchronously
         response = await agent.run(text, deps=sys_ctx)
+        
+        # Determine reply text (compatible with new AgentRunResult API)
+        reply_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
         
         # Send reply
         if update.message:
-            await update.message.reply_text(response.data)
+            await update.message.reply_text(reply_text)
     except Exception as e:
         logger.error(f"Failed to process request with agent: {e}", exc_info=True)
         if update.message:
