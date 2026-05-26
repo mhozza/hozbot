@@ -13,6 +13,13 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import agent_email
 from pydantic_ai.capabilities import Thinking
+import asyncio
+from datetime import datetime
+from database import read_calendar, mark_event_sent
+import json
+from typing import List
+import memory
+from dataclasses import field
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -34,6 +41,7 @@ class FamilySystemContext:
     username: str | None
     first_name: str | None
     last_name: str | None
+    thread_memory: List[str] = field(default_factory=list)
 
 # Initialize PydanticAI Agent with "Chief of Staff" corporate persona
 from pydantic_ai.models.google import GoogleModel
@@ -112,6 +120,12 @@ def mark_event_sent_tool(event_id: str) -> str:
     mark_event_sent(event_id)
     return f"Event {event_id} marked as reminder sent."
 
+@agent.tool
+def clear_thread_memory(ctx: RunContext[FamilySystemContext]) -> str:
+    """Clear stored thread memory for the current user."""
+    memory.clear_memory(ctx.deps.user_id)
+    return "Thread memory cleared."
+
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -131,11 +145,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info(f"Received message from authorized user {user.id} ({user.first_name})")
 
     # Construct the FamilySystemContext injection
+    # Retrieve prior thread memory for this user
+    prior_memory = memory.get_memory(user.id)
     sys_ctx = FamilySystemContext(
         user_id=user.id,
         username=user.username,
         first_name=user.first_name,
-        last_name=user.last_name
+        last_name=user.last_name,
+        thread_memory=prior_memory,
     )
 
     try:
@@ -149,6 +166,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Send reply
         if update.message:
             await update.message.reply_text(reply_text)
+        # Store the inbound message and the agent's reply in thread memory
+        memory.add_message(user.id, text)
+        memory.add_message(user.id, reply_text)
     except Exception as e:
         logger.error(f"Failed to process request with agent: {e}", exc_info=True)
         if update.message:
