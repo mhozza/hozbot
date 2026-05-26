@@ -49,12 +49,7 @@ agent = Agent(
     google_model,
     deps_type=FamilySystemContext,
     capabilities=[Thinking(effort='low')],
-    system_prompt=(
-        "You are a Family Office Chief of Staff AI Agent. "
-        "Your objective is to assist authorized family members with their requests, "
-        "summarize inbox emails, and surface action items. "
-        "Always respond in a concise, structured, professional, and action-oriented manner."
-    )
+    system_prompt=open(os.path.join(os.path.dirname(__file__), "system_prompt.md")).read().strip()
 )
 
 @agent.tool

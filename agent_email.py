@@ -73,22 +73,36 @@ def fetch_unread_emails() -> list[dict[str, str]]:
             subject = decode_mime_header(msg.get("Subject"))
             
             body = ""
+            attachments = []
             if msg.is_multipart():
                 html_fallback = ""
                 for part in msg.walk():
                     content_type = part.get_content_type()
                     content_disposition = str(part.get("Content-Disposition"))
-                    
-                    if content_type == "text/plain" and "attachment" not in content_disposition:
+                    filename = part.get_filename()
+                    # Handle attachments
+                    if "attachment" in content_disposition.lower():
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            # Limit attachment size to 1KB for preview, encode as base64
+                            import base64
+                            preview = base64.b64encode(payload[:1024]).decode()
+                            attachments.append({
+                                "filename": decode_mime_header(filename) if filename else "unknown",
+                                "mime_type": content_type,
+                                "content_base64": preview,
+                            })
+                        continue
+                    # Extract plain text body
+                    if content_type == "text/plain" and "attachment" not in content_disposition.lower():
                         payload = part.get_payload(decode=True)
                         if payload:
                             body = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
                             break
-                    elif content_type == "text/html" and "attachment" not in content_disposition:
+                    elif content_type == "text/html" and "attachment" not in content_disposition.lower():
                         payload = part.get_payload(decode=True)
                         if payload:
                             html_fallback = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
-                
                 if not body and html_fallback:
                     body = strip_html_tags(html_fallback)
             else:
@@ -107,7 +121,8 @@ def fetch_unread_emails() -> list[dict[str, str]]:
             emails_data.append({
                 "sender": sender,
                 "subject": subject,
-                "body_snippet": body_cleaned
+                "body_snippet": body_cleaned,
+                "attachments": attachments,
             })
             
     return emails_data
