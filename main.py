@@ -47,14 +47,19 @@ class FamilySystemContext:
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
+from pydantic_ai.models.fallback import FallbackModel
+
 # Initialize Google provider with API key from environment
 google_provider = GoogleProvider(api_key=os.getenv("GOOGLE_API_KEY"))
-# Create GoogleModel instance for Gemini 3.5 flash
-google_model = GoogleModel('gemini-3.5-flash', provider=google_provider)
+# Initialize GoogleModel instances for primary and fallback
+primary_model = GoogleModel('gemini-3.5-flash', provider=google_provider)
+fallback_model = GoogleModel('gemini-3.1-flash-lite', provider=google_provider)
+# Use FallbackModel to try primary first, then fallback
+model = FallbackModel(primary_model, fallback_model)
 
 # Initialize PydanticAI Agent with GoogleModel instance
 agent = Agent(
-    google_model,
+    model,
     deps_type=FamilySystemContext,
     capabilities=[Thinking(effort='low')],
     system_prompt=open(os.path.join(os.path.dirname(__file__), "system_prompt.md")).read().strip()
