@@ -5,8 +5,8 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-PROFILE_PATH = os.path.join(BASE_DIR, "family_profile.json")
-CALENDAR_PATH = os.path.join(BASE_DIR, "calendar_db.json")
+PROFILE_PATH = os.path.join(BASE_DIR, "storage", "family_profile.json")
+CALENDAR_PATH = os.path.join(BASE_DIR, "storage", "calendar_db.json")
 
 def _load_json(path: str) -> Any:
     if not os.path.exists(path):

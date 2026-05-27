@@ -92,8 +92,12 @@ def get_profile(ctx: RunContext[FamilySystemContext]) -> str:
     return json.dumps(profile, indent=2)
 
 @agent.tool
-def add_fact_tool(note: str) -> str:
-    """Add a critical note to the family profile."""
+def add_fact_tool(ctx: RunContext[FamilySystemContext], note: str) -> str:
+    """Add a critical note to the family profile.
+
+    The `ctx` parameter provides execution context and is required by the tool schema.
+    """
+    # Context is currently unused but retained for compliance with tool schema requirements.
     append_fact(note)
     return "Fact added to profile."
 
@@ -109,14 +113,18 @@ def get_calendar(ctx: RunContext[FamilySystemContext]) -> str:
     return "\n".join(lines)
 
 @agent.tool
-def add_calendar_event(title: str, timestamp_iso: str) -> str:
-    """Add a new event to the calendar and return its ID."""
+def add_calendar_event(ctx: RunContext[FamilySystemContext], title: str, timestamp_iso: str) -> str:
+    """Add a new event to the calendar and return its ID.
+
+    The `ctx` parameter provides execution context as required by the tool schema.
+    """
     event = add_event(title, timestamp_iso)
     return f"Event added with ID {event.get('id')}"
 
 @agent.tool
-def mark_event_sent_tool(event_id: str) -> str:
+def mark_event_sent_tool(ctx: RunContext[FamilySystemContext], event_id: str) -> str:
     """Mark the calendar event as reminder sent."""
+    # Context currently unused but required for tool schema
     mark_event_sent(event_id)
     return f"Event {event_id} marked as reminder sent."
 
@@ -125,8 +133,6 @@ def clear_thread_memory(ctx: RunContext[FamilySystemContext]) -> str:
     """Clear stored thread memory for the current user."""
     memory.clear_memory(ctx.deps.user_id)
     return "Thread memory cleared."
-
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Strict ID whitelist check - drop unauthorized traffic silently
@@ -191,10 +197,18 @@ def main() -> None:
     if not token:
         logger.error("Missing TELEGRAM_BOT_TOKEN environment variable. Exiting.")
         return
+    # Ensure storage directory exists and initialize JSON files
+    storage_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "storage")
+    os.makedirs(storage_path, exist_ok=True)
+    # Initialize JSON files (they will be created if missing)
+    try:
+        from database import read_profile, read_calendar
+        read_profile()
+        read_calendar()
+    except Exception as e:
+        logger.error(f"Error initializing storage files: {e}")
 
     logger.info("Initializing Family Office Agent Telegram App...")
-    
-    # Initialize python-telegram-bot application with run_polling
     application = Application.builder().token(token).build()
 
     # Handlers
