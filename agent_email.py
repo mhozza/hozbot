@@ -4,7 +4,7 @@ from email.header import decode_header
 from html.parser import HTMLParser
 from imapclient import IMAPClient
 from dotenv import load_dotenv
-from typing import Any
+from typing import Any, List
 
 class HTMLTextExtractor(HTMLParser):
     def __init__(self):
@@ -140,7 +140,7 @@ def fetch_attachment_content_by_uid(uid: str, filename: str) -> bytes | None:
     with IMAPClient(imap_server, ssl=True) as client:
         client.login(email_address, email_password)
         client.select_folder("INBOX", readonly=True)
-        resp = client.uid_fetch(uid, ["RFC822"])
+        resp = client.fetch([uid], ["RFC822"])
         if not resp or uid not in resp:
             return None
         raw_email = resp[uid][b"RFC822"]
@@ -152,7 +152,21 @@ def fetch_attachment_content_by_uid(uid: str, filename: str) -> bytes | None:
                     return part.get_payload(decode=True)
     return None
 
-def extract_pdf_text(pdf_bytes: bytes, max_pages: int = 5, max_chars: int = 4000) -> str:
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    """Extract all text from PDF bytes without page or character limits."""
+    from io import BytesIO
+    from pypdf import PdfReader
+
+    reader = PdfReader(BytesIO(pdf_bytes))
+    text_parts = []
+    for page in reader.pages:
+        try:
+            txt = page.extract_text()
+            if txt:
+                text_parts.append(txt)
+        except Exception:
+            continue
+    return " ".join(text_parts)
     """Extract text from PDF bytes, limited to first `max_pages` and `max_chars` characters."""
     from io import BytesIO
     from pypdf import PdfReader
@@ -171,7 +185,36 @@ def extract_pdf_text(pdf_bytes: bytes, max_pages: int = 5, max_chars: int = 4000
     full_text = " ".join(text_parts)
     return full_text[:max_chars]
 
-if __name__ == "__main__":
+def fetch_and_extract_pdfs_from_email(uid: str) -> List[str]:
+    """Download all PDF attachments for the given email UID and return their extracted texts."""
+    load_dotenv()
+    imap_server = os.getenv("EMAIL_IMAP_SERVER")
+    email_address = os.getenv("EMAIL_ADDRESS")
+    email_password = os.getenv("EMAIL_APP_PASSWORD")
+    if not all([imap_server, email_address, email_password]):
+        raise ValueError("Missing IMAP environment configuration.")
+    extracted_texts: List[str] = []
+    with IMAPClient(imap_server, ssl=True) as client:
+        client.login(email_address, email_password)
+        client.select_folder("INBOX", readonly=True)
+        resp = client.fetch([uid], ["RFC822"])
+        if not resp or uid not in resp:
+            return extracted_texts
+        raw_email = resp[uid][b"RFC822"]
+        msg = email.message_from_bytes(raw_email)
+        for part in msg.walk():
+            fname = part.get_filename()
+            if fname:
+                fname = decode_mime_header(fname)
+                if fname.lower().endswith('.pdf'):
+                    pdf_bytes = part.get_payload(decode=True)
+                    if pdf_bytes:
+                        try:
+                            text = extract_pdf_text(pdf_bytes)
+                            extracted_texts.append(text)
+                        except Exception:
+                            continue
+    return extracted_texts
     # Simple self-test code when run directly
     try:
         print("Fetching emails...")

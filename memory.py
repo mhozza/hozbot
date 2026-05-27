@@ -4,7 +4,10 @@ from typing import List, Dict
 
 # Define path for thread memory storage (JSON file)
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-MEMORY_FILE = os.path.join(BASE_DIR, "storage", "thread_memory.json")
+STORAGE_DIR = os.path.join(BASE_DIR, "storage")
+if not os.path.isdir(STORAGE_DIR):
+    os.makedirs(STORAGE_DIR, exist_ok=True)
+MEMORY_FILE = os.path.join(STORAGE_DIR, "thread_memory.json")
 
 def _load_memory() -> Dict[str, List[str]]:
     """Load the memory JSON file. Returns a dict mapping user_id (as string) to list of messages."""

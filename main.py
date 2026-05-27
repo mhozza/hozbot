@@ -84,6 +84,7 @@ def check_shared_inbox(ctx: RunContext[FamilySystemContext]) -> str:
         return f"Error retrieving emails: {str(e)}"
 
 from database import read_profile, write_profile, append_fact, read_calendar, add_event, mark_event_sent
+from agent_email import fetch_and_extract_pdfs_from_email
 
 @agent.tool
 def get_profile(ctx: RunContext[FamilySystemContext]) -> str:
@@ -133,6 +134,23 @@ def clear_thread_memory(ctx: RunContext[FamilySystemContext]) -> str:
     """Clear stored thread memory for the current user."""
     memory.clear_memory(ctx.deps.user_id)
     return "Thread memory cleared."
+
+
+
+@agent.tool
+def extract_pdfs_from_email(ctx: RunContext[FamilySystemContext], uid: str) -> str:
+    """Download all PDF attachments for the given email UID and return their extracted texts as JSON string."""
+    try:
+        texts = fetch_and_extract_pdfs_from_email(uid)
+        if not texts:
+            return "No PDF attachments found for this email."
+        return json.dumps({"uid": uid, "pdf_texts": texts}, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Error extracting PDFs from email {uid}: {e}", exc_info=True)
+        return f"Error extracting PDFs: {str(e)}"
+
+
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Strict ID whitelist check - drop unauthorized traffic silently
