@@ -69,7 +69,9 @@ agent = Agent(
 def check_shared_inbox(ctx: RunContext[FamilySystemContext]) -> str:
     """Fetch and summarize unread emails in the shared family office inbox.
     
-    Returns a detailed summary of unread emails, including sender, subject, and snippet/body.
+    Returns a detailed summary of unread emails, including UID, sender, subject,
+    body snippet, and any attachments with their filenames.
+    Use the returned UID and attachment filename with the download_attachment tool.
     """
     try:
         emails = agent_email.fetch_unread_emails()
@@ -78,18 +80,23 @@ def check_shared_inbox(ctx: RunContext[FamilySystemContext]) -> str:
         
         email_summaries = []
         for idx, email_data in enumerate(emails, 1):
-            email_summaries.append(
-                f"[{idx}] From: {email_data['sender']}\n"
+            summary = (
+                f"[{idx}] UID: {email_data['uid']}\n"
+                f"From: {email_data['sender']}\n"
                 f"Subject: {email_data['subject']}\n"
                 f"Content: {email_data['body_snippet']}\n"
             )
+            if email_data['attachments']:
+                att_lines = [f"  - {a['filename']} ({a['mime_type']}, {a['size_bytes']} bytes)" for a in email_data['attachments']]
+                summary += "Attachments:\n" + "\n".join(att_lines) + "\n"
+            email_summaries.append(summary)
         return "\n".join(email_summaries)
     except Exception as e:
         logger.error(f"Error in check_shared_inbox tool: {e}", exc_info=True)
         return f"Error retrieving emails: {str(e)}"
 
 from database import read_profile, write_profile, append_fact, read_calendar, add_event, mark_event_sent
-from agent_email import fetch_and_extract_pdfs_from_email
+from agent_email import extract_pdf_text, fetch_attachment_content_by_uid
 
 @agent.tool
 def get_profile(ctx: RunContext[FamilySystemContext]) -> str:
@@ -143,16 +150,36 @@ def clear_thread_memory(ctx: RunContext[FamilySystemContext]) -> str:
 
 
 @agent.tool
-def extract_pdfs_from_email(ctx: RunContext[FamilySystemContext], uid: str) -> str:
-    """Download all PDF attachments for the given email UID and return their extracted texts as JSON string."""
+def download_attachment(ctx: RunContext[FamilySystemContext], uid: str, filename: str) -> str:
+    """Download a specific attachment from an email by UID and filename, save it locally, and return the file path."""
     try:
-        texts = fetch_and_extract_pdfs_from_email(uid)
-        if not texts:
-            return "No PDF attachments found for this email."
-        return json.dumps({"uid": uid, "pdf_texts": texts}, ensure_ascii=False, indent=2)
+        data = fetch_attachment_content_by_uid(uid, filename)
+        if data is None:
+            return f"Attachment '{filename}' not found in email UID {uid}."
+        safe_filename = os.path.basename(filename)
+        out_dir = os.path.join(os.path.dirname(__file__), "downloads")
+        os.makedirs(out_dir, exist_ok=True)
+        file_path = os.path.join(out_dir, f"{uid}_{safe_filename}")
+        with open(file_path, "wb") as f:
+            f.write(data)
+        return f"Saved to {file_path} ({len(data)} bytes)"
     except Exception as e:
-        logger.error(f"Error extracting PDFs from email {uid}: {e}", exc_info=True)
-        return f"Error extracting PDFs: {str(e)}"
+        logger.error(f"Error downloading attachment: {e}", exc_info=True)
+        return f"Error downloading attachment: {str(e)}"
+
+@agent.tool
+def extract_pdf_file(ctx: RunContext[FamilySystemContext], file_path: str) -> str:
+    """Extract all text from a PDF file at the given path."""
+    try:
+        with open(file_path, "rb") as f:
+            pdf_bytes = f.read()
+        text = extract_pdf_text(pdf_bytes)
+        if not text:
+            return "No text could be extracted from the PDF."
+        return text
+    except Exception as e:
+        logger.error(f"Error extracting PDF text: {e}", exc_info=True)
+        return f"Error extracting PDF text: {str(e)}"
 
 
 
