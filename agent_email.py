@@ -174,6 +174,18 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
             continue
     return " ".join(text_parts)
 
+def mark_emails_as_read(uids: list[int]) -> None:
+    """Mark the given email UIDs as \\Seen in the IMAP INBOX."""
+    imap_server = os.getenv("EMAIL_IMAP_SERVER")
+    email_address = os.getenv("EMAIL_ADDRESS")
+    email_password = os.getenv("EMAIL_APP_PASSWORD")
+    if not all([imap_server, email_address, email_password]):
+        raise ValueError("Missing IMAP environment configuration.")
+    with IMAPClient(imap_server, ssl=True) as client:
+        client.login(email_address, email_password)
+        client.select_folder("INBOX")
+        client.add_flags(uids, [b"\\Seen"])
+
 if __name__ == "__main__":
     import argparse
     import sys

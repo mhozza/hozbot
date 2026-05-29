@@ -2,6 +2,7 @@ import os
 import logging
 from dataclasses import dataclass
 from dotenv import load_dotenv
+from string import Template
 
 # Load environment variables first to avoid credential errors during initialization
 load_dotenv()
@@ -14,7 +15,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import agent_email
 from pydantic_ai.capabilities import Thinking
 import asyncio
-from datetime import datetime
+from datetime import datetime, time
 from database import read_calendar, mark_event_sent
 import json
 from typing import List
@@ -34,6 +35,9 @@ ALLOWED_USER_IDS = [
     for uid in ALLOWED_USER_IDS_STR.split(",")
     if uid.strip().isdigit()
 ]
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
 
 @dataclass
 class FamilySystemContext:
@@ -57,12 +61,17 @@ fallback_model = GoogleModel('gemini-3.1-flash-lite', provider=google_provider)
 # Use FallbackModel to try primary first, then fallback
 model = FallbackModel(primary_model, fallback_model)
 
+# Load prompt templates
+SYSTEM_PROMPT = open(os.path.join(PROMPTS_DIR, "system_prompt.md")).read().strip()
+EMAIL_CHECK_TEMPLATE = Template(open(os.path.join(PROMPTS_DIR, "email_check.md")).read().strip())
+EVENING_DIGEST_TEMPLATE = Template(open(os.path.join(PROMPTS_DIR, "evening_digest.md")).read().strip())
+
 # Initialize PydanticAI Agent with GoogleModel instance
 agent = Agent(
     model,
     deps_type=FamilySystemContext,
     capabilities=[Thinking(effort='low')],
-    system_prompt=open(os.path.join(os.path.dirname(__file__), "system_prompt.md")).read().strip()
+    system_prompt=SYSTEM_PROMPT,
 )
 
 @agent.tool
@@ -242,6 +251,119 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "How can I assist you?"
         )
 
+async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("Scheduled email check: starting")
+    try:
+        emails = agent_email.fetch_unread_emails()
+        if not emails:
+            logger.info("Scheduled email check: no new emails")
+            return
+
+        profile = read_profile()
+        profile_summary = f"Family Profile:\n{json.dumps(profile, indent=2)}\n"
+
+        email_summary_lines = []
+        for idx, email_data in enumerate(emails, 1):
+            summary = (
+                f"[{idx}] UID: {email_data['uid']}\n"
+                f"From: {email_data['sender']}\n"
+                f"Subject: {email_data['subject']}\n"
+                f"Content: {email_data['body_snippet']}\n"
+            )
+            if email_data['attachments']:
+                for att in email_data['attachments']:
+                    if att['mime_type'] == 'application/pdf':
+                        try:
+                            pdf_bytes = fetch_attachment_content_by_uid(email_data['uid'], att['filename'])
+                            if pdf_bytes:
+                                pdf_text = extract_pdf_text(pdf_bytes)
+                                if pdf_text:
+                                    summary += f"\nExtracted text from '{att['filename']}':\n{pdf_text}\n"
+                        except Exception as e:
+                            logger.error(f"Failed to extract PDF from {att['filename']} in email {email_data['uid']}: {e}")
+                att_lines = [f"  - {a['filename']} ({a['mime_type']}, {a['size_bytes']} bytes)" for a in email_data['attachments']]
+                summary += "Attachments:\n" + "\n".join(att_lines) + "\n"
+            email_summary_lines.append(summary)
+        email_summary = profile_summary + "\n---\n".join(email_summary_lines)
+
+        system_ctx = FamilySystemContext(
+            user_id=0,
+            username="system",
+            first_name="System",
+            last_name=None,
+            thread_memory=[],
+        )
+
+        prompt = EMAIL_CHECK_TEMPLATE.safe_substitute(email_summary=email_summary)
+
+        response = await agent.run(prompt, deps=system_ctx)
+        reply_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
+
+        logger.info("Email check agent response:\n%s", reply_text)
+
+        uid_ints = [int(e['uid']) for e in emails]
+        try:
+            agent_email.mark_emails_as_read(uid_ints)
+        except Exception as e:
+            logger.error(f"Failed to mark emails as read: {e}")
+
+        stripped = reply_text.strip()
+        if stripped.startswith("[URGENT]") or stripped.startswith("[ERROR]"):
+            if stripped.startswith("[URGENT]"):
+                message = "⚠️ *Urgent update from email check:*\n\n" + stripped[len("[URGENT]"):].strip()
+                logger.info("Scheduled email check: urgent items found, notifying users")
+            else:
+                message = "❌ *Error during email check:*\n\n" + stripped[len("[ERROR]"):].strip()
+                logger.info("Scheduled email check: error encountered, notifying users")
+            for uid in ALLOWED_USER_IDS:
+                try:
+                    await context.bot.send_message(chat_id=uid, text=message, parse_mode="Markdown")
+                except Exception as e:
+                    logger.error(f"Failed to send proactive message to user {uid}: {e}")
+        else:
+            logger.info("Scheduled email check: no urgent items, staying silent")
+
+    except Exception as e:
+        logger.error(f"Scheduled email check failed: {e}", exc_info=True)
+        for uid in ALLOWED_USER_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=f"❌ Email check job failed: {str(e)}"
+                )
+            except Exception as send_err:
+                logger.error(f"Failed to send error notification to user {uid}: {send_err}")
+
+
+async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("Evening digest: starting")
+    try:
+        system_ctx = FamilySystemContext(
+            user_id=0,
+            username="system",
+            first_name="System",
+            last_name=None,
+            thread_memory=[],
+        )
+
+        prompt = EVENING_DIGEST_TEMPLATE.safe_substitute()
+
+        response = await agent.run(prompt, deps=system_ctx)
+        digest_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
+
+        full_message = f"📋 *Evening Family Briefing*\n\n{digest_text}"
+
+        for uid in ALLOWED_USER_IDS:
+            try:
+                await context.bot.send_message(chat_id=uid, text=full_message, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Failed to send digest to user {uid}: {e}")
+
+        logger.info("Evening digest: sent successfully")
+    except Exception as e:
+        logger.error(f"Evening digest failed: {e}", exc_info=True)
+
+
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -264,6 +386,19 @@ def main() -> None:
     # Handlers
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Schedule recurring jobs
+    if os.getenv("EMAIL_CHECK_ENABLED", "true").lower() == "true":
+        interval = int(os.getenv("EMAIL_CHECK_INTERVAL_MINUTES", "15"))
+        application.job_queue.run_repeating(check_email_job, interval=interval * 60, first=10)
+        logger.info(f"Scheduled email check every {interval} minutes")
+
+    if os.getenv("DIGEST_ENABLED", "true").lower() == "true":
+        digest_time_str = os.getenv("DIGEST_TIME", "19:00")
+        hour, minute = map(int, digest_time_str.split(":"))
+        digest_time = time(hour, minute, 0)
+        application.job_queue.run_daily(evening_digest_job, time=digest_time)
+        logger.info(f"Scheduled evening digest at {digest_time_str}")
 
     logger.info("Starting Telegram long polling bot...")
     application.run_polling()
