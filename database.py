@@ -1,65 +1,111 @@
 import json
 import os
 import uuid
-from datetime import datetime
-from typing import List, Dict, Any
+import fcntl
+from typing import List, Dict, Any, Callable
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 PROFILE_PATH = os.path.join(BASE_DIR, "storage", "family_profile.json")
 CALENDAR_PATH = os.path.join(BASE_DIR, "storage", "calendar_db.json")
 
-def _load_json(path: str) -> Any:
-    if not os.path.exists(path):
-        # Initialize empty file
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("[]" if path.endswith("_db.json") else "{}")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
 
-def _write_json(path: str, data: Any) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+def _default_for(path: str) -> Any:
+    """Return a sensible default for a known storage path."""
+    return [] if path.endswith("_db.json") else {}
+
+
+def _read_json(path: str) -> Any:
+    """Read a JSON file under a shared (non‑exclusive) lock.
+
+    Returns the default value for missing, empty, or corrupt files.
+    """
+    try:
+        with open(path, "r") as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            raw = f.read().strip()
+            if not raw:
+                return _default_for(path)
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return _default_for(path)
+    except FileNotFoundError:
+        return _default_for(path)
+
+
+def _update_json(path: str, fn: Callable[[Any], Any]) -> Any:
+    """Atomically read‑modify‑write a JSON file under an exclusive lock.
+
+    Opens (or creates) *path*, acquires ``LOCK_EX``, reads and deserialises
+    the content (handling empty / corrupt files), applies *fn* to the data,
+    and writes the result via a temp file + atomic ``os.rename``.
+
+    Returns the value returned by *fn*.
+    """
+    with open(path, "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        raw = f.read().strip()
+        if not raw:
+            data = _default_for(path)
+        else:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                data = _default_for(path)
+        new_data = fn(data)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as tf:
+            json.dump(new_data, tf, indent=2, ensure_ascii=False)
+            tf.flush()
+            os.fsync(tf.fileno())
+        os.rename(tmp, path)
+    return new_data
+
 
 def read_profile() -> Dict[str, Any]:
     """Return the family profile dictionary (creates file if missing)."""
-    return _load_json(PROFILE_PATH)
+    return _read_json(PROFILE_PATH)
 
-def write_profile(profile: Dict[str, Any]) -> None:
-    _write_json(PROFILE_PATH, profile)
 
 def append_fact(note: str) -> None:
-    profile = read_profile()
-    notes = profile.get("critical_notes", [])
-    if not isinstance(notes, list):
-        notes = []
-    notes.append(note)
-    profile["critical_notes"] = notes
-    write_profile(profile)
+    """Add a critical note to the family profile under lock."""
+    def update(profile):
+        notes = profile.get("critical_notes", [])
+        if not isinstance(notes, list):
+            notes = []
+        notes.append(note)
+        profile["critical_notes"] = notes
+        return profile
+    _update_json(PROFILE_PATH, update)
+
 
 def read_calendar() -> List[Dict[str, Any]]:
-    """Return list of calendar events, each event is a dict with id, title, timestamp, reminder_sent."""
-    return _load_json(CALENDAR_PATH)
+    """Return list of calendar events."""
+    return _read_json(CALENDAR_PATH)
 
-def write_calendar(events: List[Dict[str, Any]]) -> None:
-    _write_json(CALENDAR_PATH, events)
 
 def add_event(title: str, timestamp_iso: str) -> Dict[str, Any]:
-    events = read_calendar()
-    event_id = str(uuid.uuid4())
+    """Add a new event and return its dict."""
     event = {
-        "id": event_id,
+        "id": str(uuid.uuid4()),
         "title": title,
         "timestamp": timestamp_iso,
         "reminder_sent": False,
     }
-    events.append(event)
-    write_calendar(events)
+    def update(events):
+        events.append(event)
+        return events
+    _update_json(CALENDAR_PATH, update)
     return event
 
+
 def mark_event_sent(event_id: str) -> None:
-    events = read_calendar()
-    for ev in events:
-        if ev.get("id") == event_id:
-            ev["reminder_sent"] = True
-            break
-    write_calendar(events)
+    """Mark a calendar event as reminder sent."""
+    def update(events):
+        for ev in events:
+            if ev.get("id") == event_id:
+                ev["reminder_sent"] = True
+                break
+        return events
+    _update_json(CALENDAR_PATH, update)

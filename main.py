@@ -104,7 +104,7 @@ def check_shared_inbox(ctx: RunContext[FamilySystemContext]) -> str:
         logger.error(f"Error in check_shared_inbox tool: {e}", exc_info=True)
         return f"Error retrieving emails: {str(e)}"
 
-from database import read_profile, write_profile, append_fact, read_calendar, add_event, mark_event_sent
+from database import read_profile, append_fact, read_calendar, add_event, mark_event_sent
 from agent_email import extract_pdf_text, fetch_attachment_content_by_uid
 
 @agent.tool
