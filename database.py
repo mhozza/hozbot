@@ -85,14 +85,21 @@ def read_calendar() -> List[Dict[str, Any]]:
     return _read_json(CALENDAR_PATH)
 
 
-def add_event(title: str, timestamp_iso: str) -> Dict[str, Any]:
-    """Add a new event and return its dict."""
+def add_event(title: str, timestamp_iso: str, source_email_id: int | None = None) -> Dict[str, Any]:
+    """Add a new event and return its dict.
+
+    If *source_email_id* is provided, it references the ``emails.id``
+    column in ``storage/hozbot.db`` so the event can be traced back
+    to the email that triggered it.
+    """
     event = {
         "id": str(uuid.uuid4()),
         "title": title,
         "timestamp": timestamp_iso,
         "reminder_sent": False,
     }
+    if source_email_id is not None:
+        event["source_email_id"] = source_email_id
     def update(events):
         events.append(event)
         return events

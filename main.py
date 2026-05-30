@@ -12,6 +12,7 @@ from pydantic_ai import Agent, RunContext
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import agent_email
+import email_store
 from pydantic_ai.capabilities import Thinking
 import asyncio
 from datetime import datetime, time, timezone, timedelta
@@ -87,6 +88,9 @@ def check_shared_inbox(ctx: RunContext[FamilySystemContext]) -> str:
         if not emails:
             return "No unread emails found."
         
+        for email_data in emails:
+            email_store.store_email(email_data)
+
         email_summaries = []
         for idx, email_data in enumerate(emails, 1):
             summary = (
@@ -135,12 +139,20 @@ def get_calendar(ctx: RunContext[FamilySystemContext]) -> str:
     return "\n".join(lines)
 
 @agent.tool
-def add_calendar_event(ctx: RunContext[FamilySystemContext], title: str, timestamp_iso: str) -> str:
+def add_calendar_event(ctx: RunContext[FamilySystemContext], title: str, timestamp_iso: str, email_uid: str | None = None) -> str:
     """Add a new event to the calendar and return its ID.
+
+    If the event was extracted from an email, provide that email's *email_uid*
+    so the calendar entry can be traced back to the source message.
 
     The `ctx` parameter provides execution context as required by the tool schema.
     """
-    event = add_event(title, timestamp_iso)
+    source_email_id = None
+    if email_uid:
+        email_data = email_store.get_email_by_uid(email_uid)
+        if email_data:
+            source_email_id = email_data["id"]
+    event = add_event(title, timestamp_iso, source_email_id=source_email_id)
     return f"Event added with ID {event.get('id')}"
 
 @agent.tool
@@ -159,9 +171,45 @@ def clear_thread_memory(ctx: RunContext[FamilySystemContext]) -> str:
 
 
 @agent.tool
-def download_attachment(ctx: RunContext[FamilySystemContext], uid: str, filename: str) -> str:
-    """Download a specific attachment from an email by UID and filename, save it locally, and return the file path."""
+def search_stored_emails(ctx: RunContext[FamilySystemContext], query: str, limit: int = 20) -> str:
+    """Search through stored emails by sender, subject, or body content.
+
+    Returns matching email IDs with sender, subject, date, and a snippet.
+    Use the returned UID to reference emails in other tools.
+    """
     try:
+        results = email_store.search_emails(query, limit=limit)
+        if not results:
+            return "No stored emails match your query."
+        parts = [f"Found {len(results)} matching email(s):"]
+        for r in results:
+            att_line = ""
+            if r.get("attachments"):
+                att_line = f"\n       Attachments: {', '.join(a['filename'] for a in r['attachments'])}"
+            parts.append(
+                f"  • ID: {r['id']} | UID: {r['uid']}\n"
+                f"    From: {r['sender']}\n"
+                f"    Subject: {r['subject']}\n"
+                f"    {r['received_at'] or r['fetched_at']}\n"
+                f"    {r['body_snippet']}{att_line}"
+            )
+        return "\n\n".join(parts)
+    except Exception as e:
+        logger.error(f"Error in search_stored_emails tool: {e}", exc_info=True)
+        return f"Error searching emails: {str(e)}"
+
+
+@agent.tool
+def download_attachment(ctx: RunContext[FamilySystemContext], uid: str, filename: str) -> str:
+    """Download a specific attachment from an email by UID and filename, save it locally, and return the file path.
+    
+    Checks the local cache first to avoid re-downloading from IMAP.
+    """
+    try:
+        cached = email_store.get_downloaded_path(uid, filename)
+        if cached:
+            return f"Already downloaded at {cached} ({os.path.getsize(cached)} bytes)"
+
         data = fetch_attachment_content_by_uid(uid, filename)
         if data is None:
             return f"Attachment '{filename}' not found in email UID {uid}."
@@ -171,6 +219,11 @@ def download_attachment(ctx: RunContext[FamilySystemContext], uid: str, filename
         file_path = os.path.join(out_dir, f"{uid}_{safe_filename}")
         with open(file_path, "wb") as f:
             f.write(data)
+
+        email_data = email_store.get_email_by_uid(uid)
+        if email_data:
+            email_store.update_attachment_local_path(email_data["id"], filename, file_path)
+
         return f"Saved to {file_path} ({len(data)} bytes)"
     except Exception as e:
         logger.error(f"Error downloading attachment: {e}", exc_info=True)
@@ -260,13 +313,23 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.info("Scheduled email check: no new emails")
             return
 
+        email_ids_by_uid: dict[str, int] = {}
+        for email_data in emails:
+            eid = email_store.store_email(email_data)
+            if eid is not None:
+                email_ids_by_uid[email_data["uid"]] = eid
+
         profile = read_profile()
         profile_summary = f"Family Profile:\n{json.dumps(profile, indent=2)}\n"
 
+        out_dir = os.path.join(os.path.dirname(__file__), "downloads")
+        os.makedirs(out_dir, exist_ok=True)
+
         email_summary_lines = []
         for idx, email_data in enumerate(emails, 1):
+            uid = email_data["uid"]
             summary = (
-                f"[{idx}] UID: {email_data['uid']}\n"
+                f"[{idx}] UID: {uid}\n"
                 f"From: {email_data['sender']}\n"
                 f"Subject: {email_data['subject']}\n"
                 f"Content: {email_data['body_snippet']}\n"
@@ -275,13 +338,27 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 for att in email_data['attachments']:
                     if att['mime_type'] == 'application/pdf':
                         try:
-                            pdf_bytes = fetch_attachment_content_by_uid(email_data['uid'], att['filename'])
-                            if pdf_bytes:
-                                pdf_text = extract_pdf_text(pdf_bytes)
-                                if pdf_text:
-                                    summary += f"\nExtracted text from '{att['filename']}':\n{pdf_text}\n"
+                            cached = email_store.get_downloaded_path(uid, att['filename'])
+                            if cached:
+                                with open(cached, "rb") as f:
+                                    pdf_text = extract_pdf_text(f.read())
+                            else:
+                                pdf_bytes = fetch_attachment_content_by_uid(uid, att['filename'])
+                                if pdf_bytes:
+                                    pdf_text = extract_pdf_text(pdf_bytes)
+                                    safe_filename = os.path.basename(att['filename'])
+                                    file_path = os.path.join(out_dir, f"{uid}_{safe_filename}")
+                                    with open(file_path, "wb") as f:
+                                        f.write(pdf_bytes)
+                                    eid = email_ids_by_uid.get(uid)
+                                    if eid:
+                                        email_store.update_attachment_local_path(eid, att['filename'], file_path)
+                                else:
+                                    pdf_text = ""
+                            if pdf_text:
+                                summary += f"\nExtracted text from '{att['filename']}':\n{pdf_text}\n"
                         except Exception as e:
-                            logger.error(f"Failed to extract PDF from {att['filename']} in email {email_data['uid']}: {e}")
+                            logger.error(f"Failed to extract PDF from {att['filename']} in email {uid}: {e}")
                 att_lines = [f"  - {a['filename']} ({a['mime_type']}, {a['size_bytes']} bytes)" for a in email_data['attachments']]
                 summary += "Attachments:\n" + "\n".join(att_lines) + "\n"
             email_summary_lines.append(summary)
@@ -439,6 +516,7 @@ def main() -> None:
         read_calendar()
     except Exception as e:
         logger.error(f"Error initializing storage files: {e}")
+    email_store.init_db()
 
     logger.info("Initializing Family Office Agent Telegram App...")
     application = Application.builder().token(token).build()

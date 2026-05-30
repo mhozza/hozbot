@@ -1,6 +1,7 @@
 import os
 import email
 from email.header import decode_header
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from imapclient import IMAPClient
 from dotenv import load_dotenv
@@ -76,6 +77,15 @@ def fetch_unread_emails() -> list[dict[str, Any]]:
                 
                 sender = decode_mime_header(msg.get("From"))
                 subject = decode_mime_header(msg.get("Subject"))
+                date_str = msg.get("Date")
+                received_at = None
+                if date_str:
+                    try:
+                        received_at = parsedate_to_datetime(date_str).isoformat()
+                    except Exception:
+                        pass
+                message_id_raw = msg.get("Message-ID")
+                message_id = message_id_raw.strip("<>") if message_id_raw else None
                 
                 body = ""
                 attachments = []
@@ -124,6 +134,8 @@ def fetch_unread_emails() -> list[dict[str, Any]]:
                     "sender": sender,
                     "subject": subject,
                     "body_snippet": body_cleaned,
+                    "date": received_at,
+                    "message_id": message_id,
                     "attachments": attachments,
                 })
             except Exception as email_err:
@@ -207,6 +219,11 @@ if __name__ == "__main__":
     # Sub-command: extract-pdf
     extract_parser = subparsers.add_parser("extract-pdf", help="Extract text from a PDF file")
     extract_parser.add_argument("file", type=str, help="Path to the PDF file")
+    
+    # Sub-command: search
+    search_parser = subparsers.add_parser("search", help="Search stored emails")
+    search_parser.add_argument("query", type=str, help="Search query")
+    search_parser.add_argument("--limit", type=int, default=20, help="Max results")
     
     args = parser.parse_args()
     
@@ -305,6 +322,25 @@ if __name__ == "__main__":
             print(f"Error fetching attachments: {e}", file=sys.stderr)
             sys.exit(1)
             
+    elif args.command == "search":
+        from email_store import search_emails, init_db
+        init_db()
+        results = search_emails(args.query, limit=args.limit)
+        if not results:
+            print("No matching emails found.")
+        else:
+            print(f"Found {len(results)} matching email(s):\n")
+            for r in results:
+                print(f"  ID: {r['id']} | UID: {r['uid']}")
+                print(f"  From:    {r['sender']}")
+                print(f"  Subject: {r['subject']}")
+                print(f"  Received: {r['received_at']}")
+                print(f"  Snippet: {r['body_snippet']}")
+                if r.get('attachments'):
+                    atts = ", ".join(a['filename'] for a in r['attachments'])
+                    print(f"  Attachments: {atts}")
+                print()
+
     elif args.command == "extract-pdf":
         try:
             file_path = args.file
