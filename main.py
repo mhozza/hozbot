@@ -9,8 +9,9 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 from pydantic_ai import Agent, RunContext
-from telegram import Update
+from telegram import Update, Message
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram_utils import sanitize_telegram_html
 import agent_email
 import email_store
 from pydantic_ai.capabilities import Thinking
@@ -38,6 +39,16 @@ ALLOWED_USER_IDS = [
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
+
+
+async def safe_reply(message: Message, text: str) -> Message:
+    """Send a reply with HTML parse mode, sanitizing unsupported tags."""
+    return await message.reply_text(sanitize_telegram_html(text), parse_mode="HTML")
+
+
+async def safe_send(bot, chat_id: int, text: str) -> Message:
+    """Send a proactive message with HTML parse mode, sanitizing unsupported tags."""
+    return await bot.send_message(chat_id=chat_id, text=sanitize_telegram_html(text), parse_mode="HTML")
 
 
 @dataclass
@@ -283,14 +294,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         # Send reply
         if update.message:
-            await update.message.reply_text(reply_text, parse_mode="HTML")
+            await safe_reply(update.message, reply_text)
         # Store the inbound message and the agent's reply in thread memory
         memory.add_message(user.id, text)
         memory.add_message(user.id, reply_text)
     except Exception as e:
         logger.error(f"Failed to process request with agent: {e}", exc_info=True)
         if update.message:
-            await update.message.reply_text("Sorry, an error occurred while processing your request.", parse_mode="HTML")
+            await safe_reply(update.message, "Sorry, an error occurred while processing your request.")
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Strict ID whitelist check - drop unauthorized traffic silently
@@ -298,11 +309,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if update.message:
-        await update.message.reply_text(
+        await safe_reply(
+            update.message,
             "Hello. I am your Family Office Chief of Staff AI Agent. "
             "I can check the family's shared email inbox, track action items, and summarize operations. "
             "How can I assist you?",
-            parse_mode="HTML"
         )
 
 async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -397,7 +408,7 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.info("Scheduled email check: error encountered, notifying users")
             for uid in ALLOWED_USER_IDS:
                 try:
-                    await context.bot.send_message(chat_id=uid, text=message, parse_mode="HTML")
+                    await safe_send(context.bot, uid, message)
                 except Exception as e:
                     logger.error(f"Failed to send proactive message to user {uid}: {e}")
         else:
@@ -407,11 +418,7 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Scheduled email check failed: {e}", exc_info=True)
         for uid in ALLOWED_USER_IDS:
             try:
-                await context.bot.send_message(
-                    chat_id=uid,
-                    text=f"❌ Email check job failed: {str(e)}",
-                    parse_mode="HTML"
-                )
+                await safe_send(context.bot, uid, f"❌ Email check job failed: {e}")
             except Exception as send_err:
                 logger.error(f"Failed to send error notification to user {uid}: {send_err}")
 
@@ -477,7 +484,7 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         for uid in ALLOWED_USER_IDS:
             try:
-                await context.bot.send_message(chat_id=uid, text=full_message, parse_mode="HTML")
+                await safe_send(context.bot, uid, full_message)
             except Exception as e:
                 logger.error(f"Failed to send digest to user {uid}: {e}")
 
@@ -492,11 +499,7 @@ async def startup_hello_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     text = "👋 <b>Hozbot is back online!</b> Ready to check emails, manage your calendar, and keep things running. <i>Let's go!</i>"
     for uid in ALLOWED_USER_IDS:
         try:
-            await context.bot.send_message(
-                chat_id=uid,
-                text=text,
-                parse_mode="HTML"
-            )
+            await safe_send(context.bot, uid, text)
         except Exception as e:
             logger.error(f"Failed to send startup hello to user {uid}: {e}")
 
