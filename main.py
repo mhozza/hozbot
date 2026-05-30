@@ -3,6 +3,7 @@ import logging
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from string import Template
+import re
 
 # Load environment variables first to avoid credential errors during initialization
 load_dotenv()
@@ -38,6 +39,13 @@ ALLOWED_USER_IDS = [
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
+
+def escape_markdownv2(text: str) -> str:
+    """Escape special characters for Telegram MarkdownV2."""
+    for ch in r'\*_[]()~`>#+-=|{}.!':
+        text = text.replace(ch, '\\' + ch)
+    return text
+
 
 @dataclass
 class FamilySystemContext:
@@ -230,14 +238,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         # Send reply
         if update.message:
-            await update.message.reply_text(reply_text)
+            try:
+                await update.message.reply_text(reply_text, parse_mode="MarkdownV2")
+            except Exception:
+                await update.message.reply_text(reply_text)
         # Store the inbound message and the agent's reply in thread memory
         memory.add_message(user.id, text)
         memory.add_message(user.id, reply_text)
     except Exception as e:
         logger.error(f"Failed to process request with agent: {e}", exc_info=True)
         if update.message:
-            await update.message.reply_text("Sorry, an error occurred while processing your request.")
+            await update.message.reply_text("Sorry, an error occurred while processing your request.", parse_mode="MarkdownV2")
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Strict ID whitelist check - drop unauthorized traffic silently
@@ -248,7 +259,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "Hello. I am your Family Office Chief of Staff AI Agent. "
             "I can check the family's shared email inbox, track action items, and summarize operations. "
-            "How can I assist you?"
+            "How can I assist you?",
+            parse_mode="MarkdownV2"
         )
 
 async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -310,14 +322,16 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         stripped = reply_text.strip()
         if stripped.startswith("[URGENT]") or stripped.startswith("[ERROR]"):
             if stripped.startswith("[URGENT]"):
-                message = "⚠️ *Urgent update from email check:*\n\n" + stripped[len("[URGENT]"):].strip()
+                body = escape_markdownv2(stripped[len("[URGENT]"):].strip())
+                message = "⚠️ **Urgent update from email check:**\n\n" + body
                 logger.info("Scheduled email check: urgent items found, notifying users")
             else:
-                message = "❌ *Error during email check:*\n\n" + stripped[len("[ERROR]"):].strip()
+                body = escape_markdownv2(stripped[len("[ERROR]"):].strip())
+                message = "❌ **Error during email check:**\n\n" + body
                 logger.info("Scheduled email check: error encountered, notifying users")
             for uid in ALLOWED_USER_IDS:
                 try:
-                    await context.bot.send_message(chat_id=uid, text=message, parse_mode="Markdown")
+                    await context.bot.send_message(chat_id=uid, text=message, parse_mode="MarkdownV2")
                 except Exception as e:
                     logger.error(f"Failed to send proactive message to user {uid}: {e}")
         else:
@@ -329,7 +343,8 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text=f"❌ Email check job failed: {str(e)}"
+                    text=f"❌ Email check job failed: {escape_markdownv2(str(e))}",
+                    parse_mode="MarkdownV2"
                 )
             except Exception as send_err:
                 logger.error(f"Failed to send error notification to user {uid}: {send_err}")
@@ -392,11 +407,11 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         response = await agent.run(prompt, deps=system_ctx)
         digest_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
 
-        full_message = f"📋 *Evening Family Briefing — {today_str}*\n\n{digest_text}"
+        full_message = f"📋 **Evening Family Briefing — {today_str}**\n\n{escape_markdownv2(digest_text)}"
 
         for uid in ALLOWED_USER_IDS:
             try:
-                await context.bot.send_message(chat_id=uid, text=full_message, parse_mode="Markdown")
+                await context.bot.send_message(chat_id=uid, text=full_message, parse_mode="MarkdownV2")
             except Exception as e:
                 logger.error(f"Failed to send digest to user {uid}: {e}")
 
