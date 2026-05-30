@@ -1,0 +1,14 @@
+.git/
+.jj/
+__pycache__/
+*.pyc
+.env
+.venv/
+AGENTS.md
+README.md
+LICENSE
+docker-compose.yml
+.gitignore
+.python-version
+storage/
+downloads/

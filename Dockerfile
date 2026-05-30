@@ -24,7 +24,8 @@ ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 
 # Copy module files
-COPY agent_email.py main.py ./
+COPY . .
+RUN mkdir -p storage downloads
 
 # Run the long-polling bot application
 CMD ["python", "main.py"]
