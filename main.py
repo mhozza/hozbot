@@ -15,8 +15,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import agent_email
 from pydantic_ai.capabilities import Thinking
 import asyncio
-from datetime import datetime, time
-from database import read_calendar, mark_event_sent
+from datetime import datetime, time, timezone, timedelta
+from database import read_calendar, read_profile, mark_event_sent
 import json
 from typing import List
 import memory
@@ -338,6 +338,43 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Evening digest: starting")
     try:
+        now = datetime.now(timezone.utc)
+        today_str = now.strftime("%A, %Y-%m-%d")
+
+        # Fetch and cluster calendar events
+        events = read_calendar()
+        parsed = []
+        for ev in events:
+            try:
+                ts = ev["timestamp"].replace("Z", "+00:00")
+                dt = datetime.fromisoformat(ts)
+                if dt >= now:
+                    parsed.append((dt, ev))
+            except (ValueError, KeyError):
+                continue
+        parsed.sort(key=lambda x: x[0])
+
+        next_2 = [ev for dt, ev in parsed if dt <= now + timedelta(days=2)]
+        next_7 = [ev for dt, ev in parsed if dt <= now + timedelta(days=7)]
+        next_30 = [ev for dt, ev in parsed if dt <= now + timedelta(days=30)]
+
+        def fmt_cluster(cluster, label):
+            if not cluster:
+                return f"**{label}**: None"
+            s = "s" if len(cluster) > 1 else ""
+            lines = [f"**{label}**: ({len(cluster)} event{s})"]
+            for ev in cluster:
+                lines.append(f"- {ev.get('title')} at {ev.get('timestamp')}")
+            return "\n".join(lines)
+
+        event_section = "\n\n".join([
+            fmt_cluster(next_2, "Next 2 Days (Urgent)"),
+            fmt_cluster(next_7, "Next 7 Days"),
+            fmt_cluster(next_30, "Next 30 Days"),
+        ])
+
+        profile = read_profile()
+
         system_ctx = FamilySystemContext(
             user_id=0,
             username="system",
@@ -346,12 +383,16 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             thread_memory=[],
         )
 
-        prompt = EVENING_DIGEST_TEMPLATE.safe_substitute()
+        prompt = EVENING_DIGEST_TEMPLATE.safe_substitute(
+            today_date=today_str,
+            profile=json.dumps(profile, indent=2),
+            events=event_section,
+        )
 
         response = await agent.run(prompt, deps=system_ctx)
         digest_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
 
-        full_message = f"📋 *Evening Family Briefing*\n\n{digest_text}"
+        full_message = f"📋 *Evening Family Briefing — {today_str}*\n\n{digest_text}"
 
         for uid in ALLOWED_USER_IDS:
             try:
