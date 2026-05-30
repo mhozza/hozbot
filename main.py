@@ -3,8 +3,6 @@ import logging
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from string import Template
-import re
-
 # Load environment variables first to avoid credential errors during initialization
 load_dotenv()
 # Retrieve Gemini API key for PydanticAI (used automatically by the provider)
@@ -39,12 +37,6 @@ ALLOWED_USER_IDS = [
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
-
-def escape_markdownv2(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2."""
-    for ch in r'\*_[]()~`>#+-=|{}.!':
-        text = text.replace(ch, '\\' + ch)
-    return text
 
 
 @dataclass
@@ -238,17 +230,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         # Send reply
         if update.message:
-            try:
-                await update.message.reply_text(reply_text, parse_mode="MarkdownV2")
-            except Exception:
-                await update.message.reply_text(reply_text)
+            await update.message.reply_text(reply_text, parse_mode="HTML")
         # Store the inbound message and the agent's reply in thread memory
         memory.add_message(user.id, text)
         memory.add_message(user.id, reply_text)
     except Exception as e:
         logger.error(f"Failed to process request with agent: {e}", exc_info=True)
         if update.message:
-            await update.message.reply_text("Sorry, an error occurred while processing your request.", parse_mode="MarkdownV2")
+            await update.message.reply_text("Sorry, an error occurred while processing your request.", parse_mode="HTML")
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Strict ID whitelist check - drop unauthorized traffic silently
@@ -260,7 +249,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Hello. I am your Family Office Chief of Staff AI Agent. "
             "I can check the family's shared email inbox, track action items, and summarize operations. "
             "How can I assist you?",
-            parse_mode="MarkdownV2"
+            parse_mode="HTML"
         )
 
 async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -322,16 +311,16 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         stripped = reply_text.strip()
         if stripped.startswith("[URGENT]") or stripped.startswith("[ERROR]"):
             if stripped.startswith("[URGENT]"):
-                body = escape_markdownv2(stripped[len("[URGENT]"):].strip())
-                message = "⚠️ **Urgent update from email check:**\n\n" + body
+                body = stripped[len("[URGENT]"):].strip()
+                message = "⚠️ <b>Urgent update from email check:</b>\n\n" + body
                 logger.info("Scheduled email check: urgent items found, notifying users")
             else:
-                body = escape_markdownv2(stripped[len("[ERROR]"):].strip())
-                message = "❌ **Error during email check:**\n\n" + body
+                body = stripped[len("[ERROR]"):].strip()
+                message = "❌ <b>Error during email check:</b>\n\n" + body
                 logger.info("Scheduled email check: error encountered, notifying users")
             for uid in ALLOWED_USER_IDS:
                 try:
-                    await context.bot.send_message(chat_id=uid, text=message, parse_mode="MarkdownV2")
+                    await context.bot.send_message(chat_id=uid, text=message, parse_mode="HTML")
                 except Exception as e:
                     logger.error(f"Failed to send proactive message to user {uid}: {e}")
         else:
@@ -343,8 +332,8 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text=f"❌ Email check job failed: {escape_markdownv2(str(e))}",
-                    parse_mode="MarkdownV2"
+                    text=f"❌ Email check job failed: {str(e)}",
+                    parse_mode="HTML"
                 )
             except Exception as send_err:
                 logger.error(f"Failed to send error notification to user {uid}: {send_err}")
@@ -375,9 +364,9 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         def fmt_cluster(cluster, label):
             if not cluster:
-                return f"**{label}**: None"
+                return f"{label}: None"
             s = "s" if len(cluster) > 1 else ""
-            lines = [f"**{label}**: ({len(cluster)} event{s})"]
+            lines = [f"{label}: ({len(cluster)} event{s})"]
             for ev in cluster:
                 lines.append(f"- {ev.get('title')} at {ev.get('timestamp')}")
             return "\n".join(lines)
@@ -407,17 +396,32 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         response = await agent.run(prompt, deps=system_ctx)
         digest_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
 
-        full_message = f"📋 **Evening Family Briefing — {today_str}**\n\n{escape_markdownv2(digest_text)}"
+        full_message = f"📋 <b>Evening Family Briefing — {today_str}</b>\n\n{digest_text}"
 
         for uid in ALLOWED_USER_IDS:
             try:
-                await context.bot.send_message(chat_id=uid, text=full_message, parse_mode="MarkdownV2")
+                await context.bot.send_message(chat_id=uid, text=full_message, parse_mode="HTML")
             except Exception as e:
                 logger.error(f"Failed to send digest to user {uid}: {e}")
 
         logger.info("Evening digest: sent successfully")
     except Exception as e:
         logger.error(f"Evening digest failed: {e}", exc_info=True)
+
+
+async def startup_hello_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a startup hello message to all authorized users."""
+    logger.info("Sending startup hello to authorized users")
+    text = "👋 <b>Hozbot is back online!</b> Ready to check emails, manage your calendar, and keep things running. <i>Let's go!</i>"
+    for uid in ALLOWED_USER_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=text,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send startup hello to user {uid}: {e}")
 
 
 def main() -> None:
@@ -462,6 +466,10 @@ def main() -> None:
         if now >= digest_datetime:
             application.job_queue.run_once(evening_digest_job, when=5, job_kwargs={"misfire_grace_time": 86400})
             logger.info("Scheduling catch-up evening digest (missed today)")
+
+    # Send startup hello
+    application.job_queue.run_once(startup_hello_job, when=5)
+    logger.info("Scheduled startup hello message")
 
     logger.info("Starting Telegram long polling bot...")
     application.run_polling()
