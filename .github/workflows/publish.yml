@@ -2,7 +2,7 @@ name: Publish on DockerHub
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     tags:
       - "v*"
 
@@ -19,6 +19,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: mhozza/hozbot
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
