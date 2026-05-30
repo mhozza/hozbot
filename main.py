@@ -390,15 +390,22 @@ def main() -> None:
     # Schedule recurring jobs
     if os.getenv("EMAIL_CHECK_ENABLED", "true").lower() == "true":
         interval = int(os.getenv("EMAIL_CHECK_INTERVAL_MINUTES", "15"))
-        application.job_queue.run_repeating(check_email_job, interval=interval * 60, first=10)
+        application.job_queue.run_repeating(check_email_job, interval=interval * 60, first=10, job_kwargs={"misfire_grace_time": 86400})
         logger.info(f"Scheduled email check every {interval} minutes")
 
     if os.getenv("DIGEST_ENABLED", "true").lower() == "true":
         digest_time_str = os.getenv("DIGEST_TIME", "19:00")
         hour, minute = map(int, digest_time_str.split(":"))
         digest_time = time(hour, minute, 0)
-        application.job_queue.run_daily(evening_digest_job, time=digest_time)
+        application.job_queue.run_daily(evening_digest_job, time=digest_time, job_kwargs={"misfire_grace_time": 86400})
         logger.info(f"Scheduled evening digest at {digest_time_str}")
+
+        # Catch up if digest time already passed today (e.g. restart / sleep after digest time)
+        now = datetime.now()
+        digest_datetime = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now >= digest_datetime:
+            application.job_queue.run_once(evening_digest_job, when=5, job_kwargs={"misfire_grace_time": 86400})
+            logger.info("Scheduling catch-up evening digest (missed today)")
 
     logger.info("Starting Telegram long polling bot...")
     application.run_polling()
