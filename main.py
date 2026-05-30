@@ -480,11 +480,9 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         response = await agent.run(prompt, deps=system_ctx)
         digest_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
 
-        full_message = f"📋 <b>Evening Family Briefing — {today_str}</b>\n\n{digest_text}"
-
         for uid in ALLOWED_USER_IDS:
             try:
-                await safe_send(context.bot, uid, full_message)
+                await safe_send(context.bot, uid, digest_text)
             except Exception as e:
                 logger.error(f"Failed to send digest to user {uid}: {e}")
 
