@@ -92,7 +92,7 @@ class _TelegramSanitizer(HTMLParser):
             self._parts.append(f"</{tag}>")
 
     def handle_data(self, data: str) -> None:
-        self._parts.append(data)
+        self._parts.append(data.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
     def handle_entityref(self, name: str) -> None:
         self._parts.append(f"&{name};")

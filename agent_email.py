@@ -1,7 +1,7 @@
 import os
 import email
 from email.header import decode_header
-from email.utils import parsedate_to_datetime
+from email.utils import parsedate_to_datetime, parseaddr
 from html.parser import HTMLParser
 from imapclient import IMAPClient
 from dotenv import load_dotenv
@@ -75,7 +75,9 @@ def fetch_unread_emails() -> list[dict[str, Any]]:
                     continue
                 msg = email.message_from_bytes(raw_email)
                 
-                sender = decode_mime_header(msg.get("From"))
+                sender_raw = decode_mime_header(msg.get("From"))
+                display_name, addr = parseaddr(sender_raw)
+                sender = display_name or addr
                 subject = decode_mime_header(msg.get("Subject"))
                 date_str = msg.get("Date")
                 received_at = None
