@@ -28,7 +28,7 @@ The Dockerfile uses a multi-stage build with `ghcr.io/astral-sh/uv:python3.13-al
 
 ## Environment Variables (`.env`)
 | Variable | Description |
-|---|---|
+|---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 | `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs (whitelist) |
 | `GOOGLE_API_KEY` | Google AI API key (for Gemini) |
@@ -39,6 +39,7 @@ The Dockerfile uses a multi-stage build with `ghcr.io/astral-sh/uv:python3.13-al
 | `EMAIL_CHECK_ENABLED` | Enable/disable periodic email checks (default: true) |
 | `DIGEST_TIME` | Time for evening digest (default: 19:00) |
 | `DIGEST_ENABLED` | Enable/disable evening digest (default: true) |
+| `SEND_HI_BYE` | Comma-separated Telegram user IDs for startup/shutdown notifications (default: empty, disabled) |
 
 ## Project Structure
 ```
@@ -46,6 +47,7 @@ hozbot/
 ├── main.py             # Telegram bot + PydanticAI agent setup + tool definitions
 ├── agent_email.py      # IMAP email fetching, PDF text extraction (also has CLI entrypoint)
 ├── database.py         # JSON-backed family profile & calendar storage
+├── email_store.py      # SQLite-backed email storage for digest queries
 ├── memory.py           # Per-user thread memory (JSON file)
 ├── prompts/            # AI prompt templates (string.Template format)
 │   ├── system_prompt.md
@@ -54,7 +56,8 @@ hozbot/
 ├── storage/            # Runtime data (gitignored)
 │   ├── family_profile.json
 │   ├── calendar_db.json
-│   └── thread_memory.json
+│   ├── thread_memory.json
+│   └── last_digest.json
 ├── downloads/          # Downloaded email attachments (gitignored)
 ├── docker-compose.yml
 ├── Dockerfile
@@ -66,14 +69,16 @@ hozbot/
 - Users send messages to a Telegram bot
 - The bot validates against `ALLOWED_USER_IDS` (whitelist)
 - A `pydantic-ai` Agent receives the message with `FallbackModel` (primary → fallback Gemini model)
-- The agent has access to tools: `check_shared_inbox`, `get_profile`, `add_fact_tool`, `get_calendar`, `add_calendar_event`, `mark_event_sent_tool`, `clear_thread_memory`, `download_attachment`, `extract_pdf_file`
+- The agent has access to tools: `check_shared_inbox`, `get_profile`, `add_fact_tool`, `get_calendar`, `add_calendar_event`, `mark_event_sent_tool`, `clear_thread_memory`, `download_attachment`, `extract_pdf_file`, `get_current_datetime`, `get_daily_digest`
 - Thread memory per user persists across messages
 
 ## Scheduled Jobs (Proactive Behaviour)
 The bot uses `python-telegram-bot`'s `JobQueue` for proactive/recurring tasks:
 
+- **Startup notification** (on bot start): Sends a hello message to all users in `SEND_HI_BYE`.
+- **Shutdown notification** (on bot stop): Sends a goodbye message to all users in `SEND_HI_BYE`.
 - **Email check** (every `EMAIL_CHECK_INTERVAL_MINUTES`): Polls the inbox, feeds new emails to the AI agent for analysis. The agent extracts dates/events and auto-adds relevant ones to the calendar (respecting family profile context). If urgent items (events within 48h) or errors are detected, a proactive message is sent to all authorized users; otherwise it stays silent.
-- **Evening digest** (daily at `DIGEST_TIME`): The AI agent compiles a structured briefing covering tomorrow's events, this week, next week, and any urgent items, then sends it to all authorized users.
+- **Evening digest** (daily at `DIGEST_TIME`): The AI agent compiles a structured briefing covering new emails since last digest, new events auto-created from emails, tomorrow's events, this week, next week, urgent items (relevant to family profile), and an "Other Notable Events" section for events unlikely to be relevant.
 
 Both jobs use a system-level `FamilySystemContext` (`user_id=0`) and can be toggled via env vars.
 
