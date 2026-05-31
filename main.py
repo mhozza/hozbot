@@ -110,6 +110,17 @@ agent = Agent(
     system_prompt=SYSTEM_PROMPT,
 )
 
+@agent.system_prompt
+def add_recent_conversation(ctx: RunContext[FamilySystemContext]) -> str:
+    msgs = ctx.deps.thread_memory
+    if not msgs:
+        return ""
+    lines = ["\n# Recent conversation history"]
+    for i, msg in enumerate(msgs):
+        speaker = "User" if i % 2 == 0 else "Hozbot"
+        lines.append(f"  {speaker}: {msg}")
+    return "\n".join(lines)
+
 @agent.tool
 def check_shared_inbox(ctx: RunContext[FamilySystemContext]) -> str:
     """Fetch and summarize unread emails in the shared family office inbox.
@@ -198,8 +209,17 @@ def mark_event_sent_tool(ctx: RunContext[FamilySystemContext], event_id: str) ->
     return f"Event {event_id} marked as reminder sent."
 
 @agent.tool
-def clear_thread_memory(ctx: RunContext[FamilySystemContext]) -> str:
-    """Clear stored thread memory for the current user."""
+def clear_thread_memory(ctx: RunContext[FamilySystemContext], before: str | None = None) -> str:
+    """Clear stored thread memory for the current user.
+
+    Args:
+        before: Optional ISO timestamp string. If provided, clears only
+                messages older than this timestamp. If omitted, clears
+                all thread memory.
+    """
+    if before:
+        memory.clear_memory_before(ctx.deps.user_id, before)
+        return f"Thread memory older than {before} cleared."
     memory.clear_memory(ctx.deps.user_id)
     return "Thread memory cleared."
 
