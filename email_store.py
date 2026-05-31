@@ -155,6 +155,19 @@ def get_recent_emails(limit: int = 10) -> list[dict[str, Any]]:
         return results
 
 
+def get_emails_since(timestamp_iso: str) -> list[dict[str, Any]]:
+    """Return emails where fetched_at > timestamp_iso, ordered newest first."""
+    with _get_connection() as conn:
+        rows = conn.execute(
+            """SELECT id, uid, sender, subject
+               FROM emails
+               WHERE fetched_at > ?
+               ORDER BY fetched_at DESC""",
+            (timestamp_iso,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_email(email_id: int) -> dict[str, Any] | None:
     with _get_connection() as conn:
         row = conn.execute(

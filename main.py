@@ -48,6 +48,22 @@ SEND_HI_BYE_USER_IDS = [
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
 
+LAST_DIGEST_PATH = os.path.join(BASE_DIR, "storage", "last_digest.json")
+
+
+def read_last_digest_time() -> str | None:
+    try:
+        with open(LAST_DIGEST_PATH) as f:
+            return json.load(f).get("last_digest_at")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def save_last_digest_time(timestamp_iso: str) -> None:
+    os.makedirs(os.path.dirname(LAST_DIGEST_PATH), exist_ok=True)
+    with open(LAST_DIGEST_PATH, "w") as f:
+        json.dump({"last_digest_at": timestamp_iso}, f)
+
 
 async def safe_reply(message: Message, text: str) -> Message:
     """Send a reply with HTML parse mode, sanitizing unsupported tags."""
@@ -475,6 +491,32 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         profile = read_profile()
 
+        # Gather new emails and events since last digest
+        last_digest_time = read_last_digest_time()
+        if last_digest_time:
+            new_emails = email_store.get_emails_since(last_digest_time)
+            new_email_ids = {e["id"] for e in new_emails}
+            if new_emails:
+                new_emails_str = "\n".join(
+                    f"- {e['subject']} (from {e['sender']})" for e in new_emails
+                )
+            else:
+                new_emails_str = "None"
+
+            events_from_new_emails = [
+                ev for ev in events
+                if ev.get("source_email_id") in new_email_ids
+            ]
+            if events_from_new_emails:
+                new_events_str = "\n".join(
+                    f"- {ev['title']} at {ev['timestamp']}" for ev in events_from_new_emails
+                )
+            else:
+                new_events_str = "None"
+        else:
+            new_emails_str = "None"
+            new_events_str = "None"
+
         system_ctx = FamilySystemContext(
             user_id=0,
             username="system",
@@ -487,6 +529,8 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             today_date=today_str,
             profile=json.dumps(profile, indent=2),
             events=event_section,
+            new_emails=new_emails_str,
+            new_events_from_emails=new_events_str,
         )
 
         response = await agent.run(prompt, deps=system_ctx)
@@ -498,6 +542,7 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception as e:
                 logger.error(f"Failed to send digest to user {uid}: {e}")
 
+        save_last_digest_time(now.isoformat())
         logger.info("Evening digest: sent successfully")
     except Exception as e:
         logger.error(f"Evening digest failed: {e}", exc_info=True)
