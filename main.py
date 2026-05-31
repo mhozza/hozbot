@@ -282,6 +282,14 @@ def extract_pdf_file(ctx: RunContext[FamilySystemContext], file_path: str) -> st
         logger.error(f"Error extracting PDF text: {e}", exc_info=True)
         return f"Error extracting PDF text: {str(e)}"
 
+@agent.tool
+async def get_daily_digest(ctx: RunContext[FamilySystemContext]) -> str:
+    """Generate the daily briefing with upcoming events, new emails since last digest, and events created from those emails. Does not update the digest watermark."""
+    try:
+        return await generate_digest_text()
+    except Exception as e:
+        logger.error(f"Error generating daily digest: {e}", exc_info=True)
+        return f"Error generating daily digest: {str(e)}"
 
 
 
@@ -451,90 +459,94 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.error(f"Failed to send error notification to user {uid}: {send_err}")
 
 
+async def generate_digest_text() -> str:
+    """Build the digest prompt, run the AI agent, and return the briefing text."""
+    now = datetime.now(timezone.utc)
+    today_str = now.strftime("%A, %Y-%m-%d")
+
+    events = read_calendar()
+    parsed = []
+    for ev in events:
+        try:
+            ts = ev["timestamp"].replace("Z", "+00:00")
+            dt = datetime.fromisoformat(ts)
+            if dt >= now:
+                parsed.append((dt, ev))
+        except (ValueError, KeyError):
+            continue
+    parsed.sort(key=lambda x: x[0])
+
+    next_2 = [ev for dt, ev in parsed if dt <= now + timedelta(days=2)]
+    next_7 = [ev for dt, ev in parsed if dt <= now + timedelta(days=7)]
+    next_30 = [ev for dt, ev in parsed if dt <= now + timedelta(days=30)]
+
+    def fmt_cluster(cluster, label):
+        if not cluster:
+            return f"{label}: None"
+        s = "s" if len(cluster) > 1 else ""
+        lines = [f"{label}: ({len(cluster)} event{s})"]
+        for ev in cluster:
+            lines.append(f"- {ev.get('title')} at {ev.get('timestamp')}")
+        return "\n".join(lines)
+
+    event_section = "\n\n".join([
+        fmt_cluster(next_2, "Next 2 Days (Urgent)"),
+        fmt_cluster(next_7, "Next 7 Days"),
+        fmt_cluster(next_30, "Next 30 Days"),
+    ])
+
+    profile = read_profile()
+
+    # Gather new emails and events since last digest (read-only, no watermark update)
+    last_digest_time = read_last_digest_time()
+    if last_digest_time:
+        new_emails = email_store.get_emails_since(last_digest_time)
+        new_email_ids = {e["id"] for e in new_emails}
+        if new_emails:
+            new_emails_str = "\n".join(
+                f"- {e['subject']} (from {e['sender']})" for e in new_emails
+            )
+        else:
+            new_emails_str = "None"
+
+        events_from_new_emails = [
+            ev for ev in events
+            if ev.get("source_email_id") in new_email_ids
+        ]
+        if events_from_new_emails:
+            new_events_str = "\n".join(
+                f"- {ev['title']} at {ev['timestamp']}" for ev in events_from_new_emails
+            )
+        else:
+            new_events_str = "None"
+    else:
+        new_emails_str = "None"
+        new_events_str = "None"
+
+    system_ctx = FamilySystemContext(
+        user_id=0,
+        username="system",
+        first_name="System",
+        last_name=None,
+        thread_memory=[],
+    )
+
+    prompt = EVENING_DIGEST_TEMPLATE.safe_substitute(
+        today_date=today_str,
+        profile=json.dumps(profile, indent=2),
+        events=event_section,
+        new_emails=new_emails_str,
+        new_events_from_emails=new_events_str,
+    )
+
+    response = await agent.run(prompt, deps=system_ctx)
+    return getattr(response, "output", None) or getattr(response, "data", None) or str(response)
+
+
 async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Evening digest: starting")
     try:
-        now = datetime.now(timezone.utc)
-        today_str = now.strftime("%A, %Y-%m-%d")
-
-        # Fetch and cluster calendar events
-        events = read_calendar()
-        parsed = []
-        for ev in events:
-            try:
-                ts = ev["timestamp"].replace("Z", "+00:00")
-                dt = datetime.fromisoformat(ts)
-                if dt >= now:
-                    parsed.append((dt, ev))
-            except (ValueError, KeyError):
-                continue
-        parsed.sort(key=lambda x: x[0])
-
-        next_2 = [ev for dt, ev in parsed if dt <= now + timedelta(days=2)]
-        next_7 = [ev for dt, ev in parsed if dt <= now + timedelta(days=7)]
-        next_30 = [ev for dt, ev in parsed if dt <= now + timedelta(days=30)]
-
-        def fmt_cluster(cluster, label):
-            if not cluster:
-                return f"{label}: None"
-            s = "s" if len(cluster) > 1 else ""
-            lines = [f"{label}: ({len(cluster)} event{s})"]
-            for ev in cluster:
-                lines.append(f"- {ev.get('title')} at {ev.get('timestamp')}")
-            return "\n".join(lines)
-
-        event_section = "\n\n".join([
-            fmt_cluster(next_2, "Next 2 Days (Urgent)"),
-            fmt_cluster(next_7, "Next 7 Days"),
-            fmt_cluster(next_30, "Next 30 Days"),
-        ])
-
-        profile = read_profile()
-
-        # Gather new emails and events since last digest
-        last_digest_time = read_last_digest_time()
-        if last_digest_time:
-            new_emails = email_store.get_emails_since(last_digest_time)
-            new_email_ids = {e["id"] for e in new_emails}
-            if new_emails:
-                new_emails_str = "\n".join(
-                    f"- {e['subject']} (from {e['sender']})" for e in new_emails
-                )
-            else:
-                new_emails_str = "None"
-
-            events_from_new_emails = [
-                ev for ev in events
-                if ev.get("source_email_id") in new_email_ids
-            ]
-            if events_from_new_emails:
-                new_events_str = "\n".join(
-                    f"- {ev['title']} at {ev['timestamp']}" for ev in events_from_new_emails
-                )
-            else:
-                new_events_str = "None"
-        else:
-            new_emails_str = "None"
-            new_events_str = "None"
-
-        system_ctx = FamilySystemContext(
-            user_id=0,
-            username="system",
-            first_name="System",
-            last_name=None,
-            thread_memory=[],
-        )
-
-        prompt = EVENING_DIGEST_TEMPLATE.safe_substitute(
-            today_date=today_str,
-            profile=json.dumps(profile, indent=2),
-            events=event_section,
-            new_emails=new_emails_str,
-            new_events_from_emails=new_events_str,
-        )
-
-        response = await agent.run(prompt, deps=system_ctx)
-        digest_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
+        digest_text = await generate_digest_text()
 
         for uid in ALLOWED_USER_IDS:
             try:
@@ -542,7 +554,7 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception as e:
                 logger.error(f"Failed to send digest to user {uid}: {e}")
 
-        save_last_digest_time(now.isoformat())
+        save_last_digest_time(datetime.now(timezone.utc).isoformat())
         logger.info("Evening digest: sent successfully")
     except Exception as e:
         logger.error(f"Evening digest failed: {e}", exc_info=True)
