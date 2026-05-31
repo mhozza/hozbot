@@ -37,6 +37,14 @@ ALLOWED_USER_IDS = [
     if uid.strip().isdigit()
 ]
 
+# Parse send hi/bye user IDs (separate from the auth whitelist)
+SEND_HI_BYE_STR = os.getenv("SEND_HI_BYE", "")
+SEND_HI_BYE_USER_IDS = [
+    int(uid.strip())
+    for uid in SEND_HI_BYE_STR.split(",")
+    if uid.strip().isdigit()
+]
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
 
@@ -179,7 +187,11 @@ def clear_thread_memory(ctx: RunContext[FamilySystemContext]) -> str:
     memory.clear_memory(ctx.deps.user_id)
     return "Thread memory cleared."
 
-
+@agent.tool_plain
+def get_current_datetime() -> str:
+    """Return the current date and time in the local timezone."""
+    now = datetime.now().astimezone()
+    return now.strftime("%A, %Y-%m-%d %H:%M:%S %Z")
 
 @agent.tool
 def search_stored_emails(ctx: RunContext[FamilySystemContext], query: str, limit: int = 20) -> str:
@@ -492,14 +504,31 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def startup_hello_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a startup hello message to all authorized users."""
-    logger.info("Sending startup hello to authorized users")
+    """Send a startup hello message to configured users."""
+    if not SEND_HI_BYE_USER_IDS:
+        logger.info("SEND_HI_BYE is empty, skipping startup hello")
+        return
+    logger.info("Sending startup hello to configured users")
     text = "👋 <b>Hozbot is back online!</b> Ready to check emails, manage your calendar, and keep things running. <i>Let's go!</i>"
-    for uid in ALLOWED_USER_IDS:
+    for uid in SEND_HI_BYE_USER_IDS:
         try:
             await safe_send(context.bot, uid, text)
         except Exception as e:
             logger.error(f"Failed to send startup hello to user {uid}: {e}")
+
+
+async def shutdown_bye_job(app: Application) -> None:
+    """Send a shutdown message to configured users."""
+    if not SEND_HI_BYE_USER_IDS:
+        logger.info("SEND_HI_BYE is empty, skipping shutdown message")
+        return
+    logger.info("Sending shutdown message to configured users")
+    text = "👋 <b>Hozbot is shutting down.</b> See you next time!"
+    for uid in SEND_HI_BYE_USER_IDS:
+        try:
+            await app.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to send shutdown message to user {uid}: {e}")
 
 
 def main() -> None:
@@ -520,7 +549,7 @@ def main() -> None:
     email_store.init_db()
 
     logger.info("Initializing Family Office Agent Telegram App...")
-    application = Application.builder().token(token).build()
+    application = Application.builder().token(token).post_stop(shutdown_bye_job).build()
 
     # Handlers
     application.add_handler(CommandHandler("start", start_cmd))
