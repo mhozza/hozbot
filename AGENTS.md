@@ -40,12 +40,14 @@ The Dockerfile uses a multi-stage build with `ghcr.io/astral-sh/uv:python3.13-al
 | `DIGEST_TIME` | Time for evening digest (default: 19:00) |
 | `DIGEST_ENABLED` | Enable/disable evening digest (default: true) |
 | `SEND_HI_BYE` | Comma-separated Telegram user IDs for startup/shutdown notifications (default: empty, disabled) |
+| `BIN_UPRN` | UPRN for bin collection lookups (see tools/get_uprn.py) |
 
 ## Project Structure
 ```
 hozbot/
 ├── main.py             # Telegram bot + PydanticAI agent setup + tool definitions
 ├── agent_email.py      # IMAP email fetching, PDF text extraction (also has CLI entrypoint)
+├── bin_collection.py   # St Albans bin collection schedule lookup
 ├── database.py         # JSON-backed family profile & calendar storage
 ├── email_store.py      # SQLite-backed email storage for digest queries
 ├── memory.py           # Per-user thread memory (JSON file)
@@ -58,6 +60,8 @@ hozbot/
 │   ├── calendar_db.json
 │   ├── thread_memory.json
 │   └── last_digest.json
+├── tools/              # Standalone utility scripts
+│   └── get_uprn.py     # Resolve address/postcode to UPRN
 ├── downloads/          # Downloaded email attachments (gitignored)
 ├── docker-compose.yml
 ├── Dockerfile
@@ -69,7 +73,7 @@ hozbot/
 - Users send messages to a Telegram bot
 - The bot validates against `ALLOWED_USER_IDS` (whitelist)
 - A `pydantic-ai` Agent receives the message with `FallbackModel` (primary → fallback Gemini model)
-- The agent has access to tools: `check_shared_inbox`, `get_profile`, `add_fact_tool`, `get_calendar`, `add_calendar_event`, `mark_event_sent_tool`, `clear_thread_memory`, `download_attachment`, `extract_pdf_file`, `get_current_datetime`, `get_daily_digest`
+- The agent has access to tools: `check_shared_inbox`, `get_profile`, `add_fact_tool`, `get_calendar`, `add_calendar_event`, `mark_event_sent_tool`, `clear_thread_memory`, `download_attachment`, `extract_pdf_file`, `get_current_datetime`, `get_daily_digest`, `check_bin_collection`
 - Thread memory per user persists across messages
 
 ## Scheduled Jobs (Proactive Behaviour)
@@ -88,4 +92,10 @@ The email module also has a standalone CLI:
 uv run agent_email.py check                          # List unread emails
 uv run agent_email.py fetch-attachments <uid>        # Download attachments
 uv run agent_email.py extract-pdf <file>             # Extract PDF text
+```
+
+## CLI (tools/get_uprn.py)
+Resolve a postcode or address to a UPRN (for the `BIN_UPRN` env var):
+```bash
+uv run tools/get_uprn.py "AL1 5TE"
 ```

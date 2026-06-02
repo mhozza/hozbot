@@ -22,6 +22,7 @@ import json
 from typing import List
 import memory
 from dataclasses import field
+import bin_collection
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -311,6 +312,13 @@ async def get_daily_digest(ctx: RunContext[FamilySystemContext]) -> str:
         logger.error(f"Error generating daily digest: {e}", exc_info=True)
         return f"Error generating daily digest: {str(e)}"
 
+@agent.tool_plain
+def check_bin_collection() -> str:
+    """Check the bin collection schedule. Returns which bins go out and when.
+
+    Reads the BIN_UPRN environment variable to look up the schedule.
+    """
+    return bin_collection.check_schedule()
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
