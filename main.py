@@ -8,7 +8,7 @@ load_dotenv()
 # Retrieve Gemini API key for PydanticAI (used automatically by the provider)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, RunContext, BinaryContent
 from telegram import Update, Message
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram_utils import sanitize_telegram_html
@@ -323,14 +323,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     user = update.effective_user
-    text = update.message.text if update.message else ""
-    if not text:
-        return
+
+    # Get text from either plain message or media caption
+    text = update.message.text or update.message.caption or ""
 
     logger.info(f"Received message from authorized user {user.id} ({user.first_name})")
 
+    # Build content for the agent (text + optional media)
+    content_parts: list = []
+    if text:
+        content_parts.append(text)
+
+    # Handle photo messages
+    if update.message and update.message.photo:
+        photo = update.message.photo[-1]
+        try:
+            file = await context.bot.get_file(photo.file_id)
+            image_bytes = await file.download_as_bytearray()
+            content_parts.append(BinaryContent(data=bytes(image_bytes), media_type='image/jpeg'))
+            logger.info(f"Downloaded photo {photo.file_id} ({len(image_bytes)} bytes)")
+        except Exception as e:
+            logger.error(f"Failed to download photo: {e}", exc_info=True)
+
+    # Handle document messages (images, PDFs)
+    if update.message and update.message.document:
+        doc = update.message.document
+        if doc.mime_type and (doc.mime_type.startswith('image/') or doc.mime_type == 'application/pdf'):
+            try:
+                file = await context.bot.get_file(doc.file_id)
+                doc_bytes = await file.download_as_bytearray()
+                content_parts.append(BinaryContent(data=bytes(doc_bytes), media_type=doc.mime_type))
+                logger.info(f"Downloaded document {doc.file_name} ({len(doc_bytes)} bytes, {doc.mime_type})")
+            except Exception as e:
+                logger.error(f"Failed to download document: {e}", exc_info=True)
+
+    if len(content_parts) == 0:
+        return
+    prompt: str | list = content_parts[0] if len(content_parts) == 1 else content_parts
+
     # Construct the FamilySystemContext injection
-    # Retrieve prior thread memory for this user
     prior_memory = memory.get_memory(user.id)
     sys_ctx = FamilySystemContext(
         user_id=user.id,
@@ -341,18 +372,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     try:
-        # Run the agent asynchronously
-        # Run the agent asynchronously
-        response = await agent.run(text, deps=sys_ctx)
-        
-        # Determine reply text (compatible with new AgentRunResult API)
+        response = await agent.run(prompt, deps=sys_ctx)
+
         reply_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
-        
-        # Send reply
+
         if update.message:
             await safe_reply(update.message, reply_text)
-        # Store the inbound message and the agent's reply in thread memory
-        memory.add_message(user.id, text)
+
+        memory_label = text if text else "[Media]"
+        memory.add_message(user.id, memory_label)
         memory.add_message(user.id, reply_text)
     except Exception as e:
         logger.error(f"Failed to process request with agent: {e}", exc_info=True)
@@ -632,7 +660,7 @@ def main() -> None:
 
     # Handlers
     application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF) & ~filters.COMMAND, handle_message))
 
     # Schedule recurring jobs
     if os.getenv("EMAIL_CHECK_ENABLED", "true").lower() == "true":
