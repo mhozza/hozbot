@@ -14,11 +14,14 @@ Usage:
 """
 
 import os
+import logging
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 import requests
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 BASE = "https://gis.stalbans.gov.uk/NoticeBoard9"
 
@@ -51,14 +54,26 @@ def get_bin_schedule(uprn: str) -> list[dict]:
     session.headers.update({"User-Agent": "Mozilla/5.0"})
     session.get(f"{BASE}/NoticeBoard.aspx", timeout=30)
 
-    r = session.post(
-        f"{BASE}/VeoliaProxy.NoticeBoard.asmx/GetServicesByUprnAndNoticeBoard",
-        json={"uprn": uprn, "noticeBoard": "default"},
-        headers={"Content-Type": "application/json; charset=utf-8"},
-        timeout=30,
-    )
-    r.raise_for_status()
-    data = r.json()
+    try:
+        r = session.post(
+            f"{BASE}/VeoliaProxy.NoticeBoard.asmx/GetServicesByUprnAndNoticeBoard",
+            json={"uprn": uprn, "noticeBoard": "default"},
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            timeout=30,
+        )
+        r.raise_for_status()
+    except requests.RequestException:
+        logger.error("Bin collection API request failed for UPRN %s: %s", uprn, r.text[:500])
+        raise
+    ctype = r.headers.get("Content-Type", "")
+    if "text/html" in ctype:
+        logger.error("Bin collection API returned captcha/block page for UPRN %s", uprn)
+        raise RuntimeError("Bin collection service is temporarily blocked (captcha challenge). Try again later.")
+    try:
+        data = r.json()
+    except requests.JSONDecodeError:
+        logger.error("Bin collection API returned invalid JSON for UPRN %s: %s", uprn, r.text[:500])
+        raise
     return data.get("d", [])
 
 
@@ -135,4 +150,5 @@ def check_schedule() -> str:
         services = get_bin_schedule(uprn)
         return format_bin_schedule(services)
     except Exception as e:
+        logger.error("Error checking bin collection: %s", e, exc_info=True)
         return f"Error checking bin collection: {e}"
