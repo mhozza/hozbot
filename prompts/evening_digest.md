@@ -12,6 +12,9 @@ $new_events_from_emails
 ## Upcoming Events (from calendar)
 $events
 
+## Bin Collection
+$bin_collection
+
 Compose a structured summary covering:
 - New emails received since the last digest (subjects listed above)
 - New events that were auto-created from those emails

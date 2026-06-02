@@ -595,6 +595,7 @@ async def generate_digest_text() -> str:
         events=event_section,
         new_emails=new_emails_str,
         new_events_from_emails=new_events_str,
+        bin_collection=bin_collection.check_schedule(),
     )
 
     response = await agent.run(prompt, deps=system_ctx)
