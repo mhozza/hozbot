@@ -1,6 +1,5 @@
 import json
 import os
-import uuid
 import fcntl
 from typing import List, Dict, Any, Callable
 
@@ -80,39 +79,4 @@ def append_fact(note: str) -> None:
     _update_json(PROFILE_PATH, update)
 
 
-def read_calendar() -> List[Dict[str, Any]]:
-    """Return list of calendar events."""
-    return _read_json(CALENDAR_PATH)
 
-
-def add_event(title: str, timestamp_iso: str, source_email_id: int | None = None) -> Dict[str, Any]:
-    """Add a new event and return its dict.
-
-    If *source_email_id* is provided, it references the ``emails.id``
-    column in ``storage/hozbot.db`` so the event can be traced back
-    to the email that triggered it.
-    """
-    event = {
-        "id": str(uuid.uuid4()),
-        "title": title,
-        "timestamp": timestamp_iso,
-        "reminder_sent": False,
-    }
-    if source_email_id is not None:
-        event["source_email_id"] = source_email_id
-    def update(events):
-        events.append(event)
-        return events
-    _update_json(CALENDAR_PATH, update)
-    return event
-
-
-def mark_event_sent(event_id: str) -> None:
-    """Mark a calendar event as reminder sent."""
-    def update(events):
-        for ev in events:
-            if ev.get("id") == event_id:
-                ev["reminder_sent"] = True
-                break
-        return events
-    _update_json(CALENDAR_PATH, update)

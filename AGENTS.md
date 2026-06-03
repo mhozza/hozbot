@@ -8,6 +8,7 @@
 - **Telegram**: `python-telegram-bot` v21.10
 - **Email**: `imapclient` v3.0.1 (IMAP + SSL)
 - **PDF**: `pypdf` v5.1.0
+- **Calendar**: Google Calendar API (`google-api-python-client`)
 - **Config**: `python-dotenv` v1.0.1
 
 ## Package Management
@@ -32,6 +33,8 @@ The Dockerfile uses a multi-stage build with `ghcr.io/astral-sh/uv:python3.13-al
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 | `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs (whitelist) |
 | `GOOGLE_API_KEY` | Google AI API key (for Gemini) |
+| `GOOGLE_CALENDAR_CREDENTIALS_FILE` | Path to Google Calendar OAuth client secrets JSON (default: `credentials.json`) |
+| `GOOGLE_CALENDAR_TOKEN_FILE` | Path to stored Google Calendar OAuth token (default: `storage/google_calendar_token.json`) |
 | `EMAIL_IMAP_SERVER` | IMAP server (e.g. imap.gmail.com) |
 | `EMAIL_ADDRESS` | Email account address |
 | `EMAIL_APP_PASSWORD` | Email app password |
@@ -48,8 +51,9 @@ hozbot/
 ├── main.py             # Telegram bot + PydanticAI agent setup + tool definitions
 ├── agent_email.py      # IMAP email fetching, PDF text extraction (also has CLI entrypoint)
 ├── bin_collection.py   # St Albans bin collection schedule lookup
-├── database.py         # JSON-backed family profile & calendar storage
+├── database.py         # JSON-backed family profile storage
 ├── email_store.py      # SQLite-backed email storage for digest queries
+├── google_calendar.py  # Google Calendar API wrapper (OAuth, CRUD, migration)
 ├── memory.py           # Per-user thread memory (JSON file)
 ├── prompts/            # AI prompt templates (string.Template format)
 │   ├── system_prompt.md
@@ -57,10 +61,11 @@ hozbot/
 │   └── evening_digest.md
 ├── storage/            # Runtime data (gitignored)
 │   ├── family_profile.json
-│   ├── calendar_db.json
+│   ├── google_calendar_token.json
 │   ├── thread_memory.json
 │   └── last_digest.json
 ├── tools/              # Standalone utility scripts
+│   ├── auth_google_calendar.py  # One-time Google Calendar OAuth setup
 │   └── get_uprn.py     # Resolve address/postcode to UPRN
 ├── downloads/          # Downloaded email attachments (gitignored)
 ├── docker-compose.yml
@@ -73,7 +78,7 @@ hozbot/
 - Users send messages to a Telegram bot
 - The bot validates against `ALLOWED_USER_IDS` (whitelist)
 - A `pydantic-ai` Agent receives the message with `FallbackModel` (primary → fallback Gemini model)
-- The agent has access to tools: `check_shared_inbox`, `get_profile`, `add_fact_tool`, `get_calendar`, `add_calendar_event`, `mark_event_sent_tool`, `clear_thread_memory`, `download_attachment`, `extract_pdf_file`, `get_current_datetime`, `get_daily_digest`, `check_bin_collection`
+- The agent has access to tools: `check_shared_inbox`, `get_profile`, `add_fact_tool`, `get_calendar`, `add_calendar_event`, `delete_calendar_event`, `update_calendar_event`, `clear_thread_memory`, `download_attachment`, `extract_pdf_file`, `get_current_datetime`, `get_daily_digest`, `check_bin_collection`
 - Thread memory per user persists across messages
 
 ## Scheduled Jobs (Proactive Behaviour)
@@ -93,6 +98,15 @@ uv run agent_email.py check                          # List unread emails
 uv run agent_email.py fetch-attachments <uid>        # Download attachments
 uv run agent_email.py extract-pdf <file>             # Extract PDF text
 ```
+
+## CLI (tools/auth_google_calendar.py)
+One-time OAuth setup — run this before the bot's first use of Google Calendar:
+```bash
+uv run tools/auth_google_calendar.py
+# If signed into multiple Google accounts, specify which one:
+uv run tools/auth_google_calendar.py --email hozbot@gmail.com
+```
+Opens a URL in your browser; authorize and paste the code back.
 
 ## CLI (tools/get_uprn.py)
 Resolve a postcode or address to a UPRN (for the `BIN_UPRN` env var):

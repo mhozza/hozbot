@@ -17,7 +17,7 @@ import email_store
 from pydantic_ai.capabilities import Thinking
 import asyncio
 from datetime import datetime, time, timezone, timedelta
-from database import read_calendar, read_profile, mark_event_sent
+from database import read_profile, append_fact
 import json
 from typing import List
 import memory
@@ -89,6 +89,27 @@ from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
 from pydantic_ai.models.fallback import FallbackModel
+from google_calendar import GoogleCalendar, migrate_from_json, _parse_iso
+import database as db_mod
+
+# Initialize Google Calendar client
+GOOGLE_CALENDAR_CREDS = os.getenv("GOOGLE_CALENDAR_CREDENTIALS_FILE", os.path.join(BASE_DIR, "storage", "credentials.json"))
+GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN_FILE", os.path.join(BASE_DIR, "storage", "google_calendar_token.json"))
+gc = GoogleCalendar(GOOGLE_CALENDAR_CREDS, GOOGLE_CALENDAR_TOKEN)
+
+
+def _parse_iso_for_digest(iso_str: str) -> datetime:
+    return _parse_iso(iso_str)
+
+
+def _get_source_email_id(event: dict) -> int | None:
+    raw = event.get("extendedProperties", {}).get("private", {}).get("sourceEmailId")
+    if raw is not None:
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return None
+    return None
 
 # Initialize Google provider with API key from environment
 google_provider = GoogleProvider(api_key=os.getenv("GOOGLE_API_KEY"))
@@ -155,7 +176,6 @@ def check_shared_inbox(ctx: RunContext[FamilySystemContext]) -> str:
         logger.error(f"Error in check_shared_inbox tool: {e}", exc_info=True)
         return f"Error retrieving emails: {str(e)}"
 
-from database import read_profile, append_fact, read_calendar, add_event, mark_event_sent
 from agent_email import extract_pdf_text, fetch_attachment_content_by_uid
 
 @agent.tool
@@ -176,38 +196,81 @@ def add_fact_tool(ctx: RunContext[FamilySystemContext], note: str) -> str:
 
 @agent.tool
 def get_calendar(ctx: RunContext[FamilySystemContext]) -> str:
-    """Return the list of upcoming calendar events."""
-    events = read_calendar()
-    if not events:
-        return "No events scheduled."
-    lines = []
-    for ev in events:
-        lines.append(f"- {ev.get('title')} at {ev.get('timestamp')} (sent: {ev.get('reminder_sent')})")
-    return "\n".join(lines)
+    """Return the list of upcoming calendar events (next 90 days)."""
+    try:
+        now = datetime.now(timezone.utc)
+        events = gc.list_events(now, now + timedelta(days=90))
+        if not events:
+            return "No events scheduled."
+        lines = ["Upcoming events (next 90 days):"]
+        for ev in events:
+            title = ev.get("summary", "Untitled")
+            start = ev.get("start", {}).get("dateTime", "?")
+            event_id = ev.get("id", "?")
+            lines.append(f"- {title} at {start} (ID: {event_id})")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("Error in get_calendar tool: %s", e, exc_info=True)
+        return f"Error retrieving calendar: {str(e)}"
 
 @agent.tool
-def add_calendar_event(ctx: RunContext[FamilySystemContext], title: str, timestamp_iso: str, email_uid: str | None = None) -> str:
-    """Add a new event to the calendar and return its ID.
+def add_calendar_event(ctx: RunContext[FamilySystemContext], title: str, start_iso: str, end_iso: str | None = None, email_uid: str | None = None) -> str:
+    """Add a new event to the Google Calendar and return its Google Calendar event ID.
 
-    If the event was extracted from an email, provide that email's *email_uid*
-    so the calendar entry can be traced back to the source message.
-
-    The `ctx` parameter provides execution context as required by the tool schema.
+    - title: Event title/summary
+    - start_iso: ISO 8601 start datetime (e.g. "2026-06-23T09:00:00Z")
+    - end_iso: Optional ISO 8601 end datetime. If omitted, defaults to 1 hour after start.
+    - email_uid: If the event was extracted from an email, provide that email's UID
+      so the calendar entry can be traced back to the source message.
     """
-    source_email_id = None
-    if email_uid:
-        email_data = email_store.get_email_by_uid(email_uid)
-        if email_data:
-            source_email_id = email_data["id"]
-    event = add_event(title, timestamp_iso, source_email_id=source_email_id)
-    return f"Event added with ID {event.get('id')}"
+    try:
+        source_email_id = None
+        if email_uid:
+            email_data = email_store.get_email_by_uid(email_uid)
+            if email_data:
+                source_email_id = email_data["id"]
+        event = gc.create_event(
+            summary=title,
+            start_iso=start_iso,
+            end_iso=end_iso,
+            source_email_id=source_email_id,
+        )
+        return f"Event added with ID {event.get('id')}"
+    except Exception as e:
+        logger.error("Error in add_calendar_event tool: %s", e, exc_info=True)
+        return f"Error adding event: {str(e)}"
 
 @agent.tool
-def mark_event_sent_tool(ctx: RunContext[FamilySystemContext], event_id: str) -> str:
-    """Mark the calendar event as reminder sent."""
-    # Context currently unused but required for tool schema
-    mark_event_sent(event_id)
-    return f"Event {event_id} marked as reminder sent."
+def delete_calendar_event(ctx: RunContext[FamilySystemContext], event_id: str) -> str:
+    """Delete a calendar event by its Google Calendar event ID.
+
+    Use the ID shown when listing events with get_calendar.
+    """
+    try:
+        gc.delete_event(event_id)
+        return f"Event {event_id} deleted."
+    except Exception as e:
+        logger.error("Error in delete_calendar_event tool: %s", e, exc_info=True)
+        return f"Error deleting event: {str(e)}"
+
+@agent.tool
+def update_calendar_event(ctx: RunContext[FamilySystemContext], event_id: str, title: str | None = None, start_iso: str | None = None, end_iso: str | None = None) -> str:
+    """Update an existing calendar event by its Google Calendar event ID.
+
+    Only provided fields will be updated. Omit fields you don't want to change.
+    Use the ID shown when listing events with get_calendar.
+    """
+    try:
+        gc.update_event(
+            event_id=event_id,
+            summary=title,
+            start_iso=start_iso,
+            end_iso=end_iso,
+        )
+        return f"Event {event_id} updated."
+    except Exception as e:
+        logger.error("Error in update_calendar_event tool: %s", e, exc_info=True)
+        return f"Error updating event: {str(e)}"
 
 @agent.tool
 def clear_thread_memory(ctx: RunContext[FamilySystemContext], before: str | None = None) -> str:
@@ -520,17 +583,17 @@ async def generate_digest_text() -> str:
     now = datetime.now(timezone.utc)
     today_str = now.strftime("%A, %Y-%m-%d")
 
-    events = read_calendar()
+    events = gc.list_events(now, now + timedelta(days=30))
     parsed = []
     for ev in events:
+        start_str = ev.get("start", {}).get("dateTime")
+        if not start_str:
+            continue
         try:
-            ts = ev["timestamp"].replace("Z", "+00:00")
-            dt = datetime.fromisoformat(ts)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+            dt = _parse_iso_for_digest(start_str)
             if dt >= now:
                 parsed.append((dt, ev))
-        except (ValueError, KeyError):
+        except (ValueError, TypeError):
             continue
     parsed.sort(key=lambda x: x[0])
 
@@ -544,7 +607,7 @@ async def generate_digest_text() -> str:
         s = "s" if len(cluster) > 1 else ""
         lines = [f"{label}: ({len(cluster)} event{s})"]
         for ev in cluster:
-            lines.append(f"- {ev.get('title')} at {ev.get('timestamp')}")
+            lines.append(f"- {ev.get('summary', 'Untitled')} at {ev.get('start', {}).get('dateTime', '?')}")
         return "\n".join(lines)
 
     event_section = "\n\n".join([
@@ -569,11 +632,11 @@ async def generate_digest_text() -> str:
 
         events_from_new_emails = [
             ev for ev in events
-            if ev.get("source_email_id") in new_email_ids
+            if _get_source_email_id(ev) in new_email_ids
         ]
         if events_from_new_emails:
             new_events_str = "\n".join(
-                f"- {ev['title']} at {ev['timestamp']}" for ev in events_from_new_emails
+                f"- {ev.get('summary', 'Untitled')} at {ev.get('start', {}).get('dateTime', '?')}" for ev in events_from_new_emails
             )
         else:
             new_events_str = "None"
@@ -652,17 +715,30 @@ def main() -> None:
     if not token:
         logger.error("Missing TELEGRAM_BOT_TOKEN environment variable. Exiting.")
         return
-    # Ensure storage directory exists and initialize JSON files
+    # Ensure storage directory exists
     storage_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "storage")
     os.makedirs(storage_path, exist_ok=True)
-    # Initialize JSON files (they will be created if missing)
+    # Initialize profile JSON file if missing
     try:
-        from database import read_profile, read_calendar
         read_profile()
-        read_calendar()
     except Exception as e:
-        logger.error(f"Error initializing storage files: {e}")
+        logger.error(f"Error initializing profile file: {e}")
     email_store.init_db()
+
+    # Authenticate Google Calendar (non-interactive — run `uv run google_calendar.py` if needed)
+    try:
+        auth_ok = gc.try_load_token()
+        if not auth_ok:
+            logger.warning(
+                "Google Calendar not authenticated. Calendar features will be unavailable. "
+                "Run `uv run google_calendar.py` to set up OAuth."
+            )
+        elif os.path.exists(db_mod.CALENDAR_PATH):
+            count = migrate_from_json(db_mod.CALENDAR_PATH, gc)
+            if count > 0:
+                logger.info("Migrated %d events from JSON to Google Calendar", count)
+    except Exception as e:
+        logger.error(f"Failed to initialize Google Calendar: {e}")
 
     logger.info("Initializing Family Office Agent Telegram App...")
     application = Application.builder().token(token).post_stop(shutdown_bye_job).build()
