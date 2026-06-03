@@ -2,7 +2,8 @@
 
 Uses the VeoliaProxy API behind the St Albans notice board
 (gis.stalbans.gov.uk/NoticeBoard9) to fetch bin collection dates
-by UPRN (Unique Property Reference Number).
+by UPRN (Unique Property Reference Number). Results are cached to
+avoid hitting the captcha-prone endpoint on every call.
 
 Usage:
     from bin_collection import get_bin_schedule, format_bin_schedule, check_schedule
@@ -14,6 +15,7 @@ Usage:
 """
 
 import os
+import json
 import logging
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -24,6 +26,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 BASE = "https://gis.stalbans.gov.uk/NoticeBoard9"
+
+CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage", "bin_cache.json")
 
 BIN_LABELS = {
     "Collect Domestic Refuse": "Brown bin (general waste)",
@@ -44,12 +48,63 @@ def _friendly_name(task_type: str) -> str:
     return BIN_LABELS.get(task_type, task_type)
 
 
+def _cache_is_valid(cache: dict, uprn: str) -> bool:
+    if cache.get("uprn") != uprn:
+        return False
+    now = datetime.now(timezone.utc)
+    for svc in cache.get("services", []):
+        for h in svc.get("ServiceHeaders", []):
+            try:
+                dt = datetime.fromisoformat(h["Next"])
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt < now:
+                    return False
+            except (ValueError, KeyError):
+                return False
+    return True
+
+
+def _load_cache(uprn: str) -> list[dict] | None:
+    try:
+        with open(CACHE_PATH) as f:
+            cache = json.load(f)
+        if _cache_is_valid(cache, uprn):
+            logger.info("Using cached bin schedule for UPRN %s", uprn)
+            return cache["services"]
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _save_cache(uprn: str, services: list[dict]) -> None:
+    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+    cache = {
+        "uprn": uprn,
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+        "services": services,
+    }
+    with open(CACHE_PATH, "w") as f:
+        json.dump(cache, f)
+
+
 def get_bin_schedule(uprn: str) -> list[dict]:
     """Fetch bin collection services for a UPRN from the Veolia API.
 
-    Returns a list of services, each containing ServiceHeaders with
-    TaskType, Next, Last, and ScheduleDescription fields.
+    Results are cached to storage/bin_cache.json and reused until
+    any Next collection date falls in the past.
     """
+    cached = _load_cache(uprn)
+    if cached is not None:
+        return cached
+
+    services = _fetch_from_api(uprn)
+    _save_cache(uprn, services)
+    return services
+
+
+def _fetch_from_api(uprn: str) -> list[dict]:
+    """Call the Veolia API directly."""
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0"})
     session.get(f"{BASE}/NoticeBoard.aspx", timeout=30)
