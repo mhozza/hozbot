@@ -1,5 +1,19 @@
 Generate the evening family briefing for $today_date.
 
+Compose a structured summary covering (in order):
+- Any items needing urgent attention (i.e. in next 48 hours, or other reasons). Include bin collection here if needed.
+- What's happening this week
+- What's happening next week
+- New emails received since the last digest (subjects listed above)
+- New events that were auto-created from those emails
+- An "Other Notable Events" section at the bottom for any events that seem unlikely to be relevant based on the family profile, so they remain visible but are not mixed with urgent items.
+
+
+Be concise, structured, and action-oriented. Make the report look polished. Don't repeat events.
+Skip sections that don't have any data. Just mention there were no emails/events/whatever you have skipped at the end of the repport
+Only include bin collection info if there is a bin collection tomorrow. if it's doday or more than 1 day ahead, skip it.
+Use family profile to determine if an event is relevant or not. 
+
 ## Family Profile
 $profile
 
@@ -15,13 +29,3 @@ $events
 ## Bin Collection
 $bin_collection
 
-Compose a structured summary covering:
-- New emails received since the last digest (subjects listed above)
-- New events that were auto-created from those emails
-- What's happening tomorrow
-- What's happening this week
-- What's happening next week
-- Any items needing urgent attention (events within 48 hours, critical profile notes). Only include events relevant to the family profile here.
-- An "Other Notable Events" section at the bottom for any events that seem unlikely to be relevant based on the family profile, so they remain visible but are not mixed with urgent items.
-- Be concise, structured, and action-oriented.
-- If there are no new emails, events, or upcoming events, just say so.
