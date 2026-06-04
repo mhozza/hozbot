@@ -52,7 +52,8 @@ hozbot/
 ├── agent_email.py      # IMAP email fetching, PDF text extraction (also has CLI entrypoint)
 ├── bin_collection.py   # St Albans bin collection schedule lookup
 ├── database.py         # JSON-backed family profile storage
-├── email_store.py      # SQLite-backed email storage for digest queries
+├── email_store.py      # SQLite-backed email storage + email_events table for digest queries
+├── event_store.py      # SQLite-backed CRUD for email-extracted events
 ├── google_calendar.py  # Google Calendar API wrapper (OAuth, CRUD, migration)
 ├── memory.py           # Per-user thread memory (JSON file)
 ├── prompts/            # AI prompt templates (string.Template format)
@@ -62,6 +63,8 @@ hozbot/
 ├── storage/            # Runtime data (gitignored)
 │   ├── family_profile.json
 │   ├── google_calendar_token.json
+│   ├── hozbot.db       # SQLite database (emails + email_events)
+│   ├── calendar_db.json.migrated  # Backup of old JSON calendar data
 │   ├── thread_memory.json
 │   └── last_digest.json
 ├── tools/              # Standalone utility scripts
@@ -78,7 +81,7 @@ hozbot/
 - Users send messages to a Telegram bot
 - The bot validates against `ALLOWED_USER_IDS` (whitelist)
 - A `pydantic-ai` Agent receives the message with `FallbackModel` (primary → fallback Gemini model)
-- The agent has access to tools: `check_shared_inbox`, `get_profile`, `add_fact_tool`, `get_calendar`, `add_calendar_event`, `delete_calendar_event`, `update_calendar_event`, `clear_thread_memory`, `download_attachment`, `extract_pdf_file`, `get_current_datetime`, `get_daily_digest`, `check_bin_collection`
+- The agent has access to tools: `check_shared_inbox`, `get_profile`, `add_fact_tool`, `get_calendar`, `add_calendar_event`, `delete_calendar_event`, `update_calendar_event`, `add_email_event`, `sync_email_event_to_gcal`, `list_email_events`, `remove_email_event`, `clear_thread_memory`, `download_attachment`, `extract_pdf_file`, `get_current_datetime`, `get_daily_digest`, `check_bin_collection`
 - Thread memory per user persists across messages
 
 ## Scheduled Jobs (Proactive Behaviour)
@@ -86,7 +89,7 @@ The bot uses `python-telegram-bot`'s `JobQueue` for proactive/recurring tasks:
 
 - **Startup notification** (on bot start): Sends a hello message to all users in `SEND_HI_BYE`.
 - **Shutdown notification** (on bot stop): Sends a goodbye message to all users in `SEND_HI_BYE`.
-- **Email check** (every `EMAIL_CHECK_INTERVAL_MINUTES`): Polls the inbox, feeds new emails to the AI agent for analysis. The agent extracts dates/events and auto-adds relevant ones to the calendar (respecting family profile context). If urgent items (events within 48h) or errors are detected, a proactive message is sent to all authorized users; otherwise it stays silent.
+- **Email check** (every `EMAIL_CHECK_INTERVAL_MINUTES`): Polls the inbox, feeds new emails to the AI agent for analysis. The agent stores ALL extracted dates/events in a local SQLite database, then syncs relevant ones (based on family profile) to Google Calendar. If urgent items (events within 48h) or errors are detected, a proactive message is sent to all authorized users; otherwise it stays silent.
 - **Evening digest** (daily at `DIGEST_TIME`): The AI agent compiles a structured briefing covering new emails since last digest, new events auto-created from emails, tomorrow's events, this week, next week, urgent items (relevant to family profile), and an "Other Notable Events" section for events unlikely to be relevant.
 
 Both jobs use a system-level `FamilySystemContext` (`user_id=0`) and can be toggled via env vars.

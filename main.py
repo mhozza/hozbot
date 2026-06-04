@@ -91,6 +91,7 @@ from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.models.fallback import FallbackModel
 from google_calendar import GoogleCalendar, migrate_from_json, _parse_iso
 import database as db_mod
+import event_store
 
 # Initialize Google Calendar client
 GOOGLE_CALENDAR_CREDS = os.getenv("GOOGLE_CALENDAR_CREDENTIALS_FILE", os.path.join(BASE_DIR, "storage", "credentials.json"))
@@ -102,14 +103,7 @@ def _parse_iso_for_digest(iso_str: str) -> datetime:
     return _parse_iso(iso_str)
 
 
-def _get_source_email_id(event: dict) -> int | None:
-    raw = event.get("extendedProperties", {}).get("private", {}).get("sourceEmailId")
-    if raw is not None:
-        try:
-            return int(raw)
-        except (ValueError, TypeError):
-            return None
-    return None
+
 
 # Initialize Google provider with API key from environment
 google_provider = GoogleProvider(api_key=os.getenv("GOOGLE_API_KEY"))
@@ -214,27 +208,15 @@ def get_calendar(ctx: RunContext[FamilySystemContext]) -> str:
         return f"Error retrieving calendar: {str(e)}"
 
 @agent.tool
-def add_calendar_event(ctx: RunContext[FamilySystemContext], title: str, start_iso: str, end_iso: str | None = None, email_uid: str | None = None) -> str:
-    """Add a new event to the Google Calendar and return its Google Calendar event ID.
+def add_calendar_event(ctx: RunContext[FamilySystemContext], title: str, start_iso: str, end_iso: str | None = None) -> str:
+    """Add a new event directly to the Google Calendar.
 
     - title: Event title/summary
     - start_iso: ISO 8601 start datetime (e.g. "2026-06-23T09:00:00Z")
     - end_iso: Optional ISO 8601 end datetime. If omitted, defaults to 1 hour after start.
-    - email_uid: If the event was extracted from an email, provide that email's UID
-      so the calendar entry can be traced back to the source message.
     """
     try:
-        source_email_id = None
-        if email_uid:
-            email_data = email_store.get_email_by_uid(email_uid)
-            if email_data:
-                source_email_id = email_data["id"]
-        event = gc.create_event(
-            summary=title,
-            start_iso=start_iso,
-            end_iso=end_iso,
-            source_email_id=source_email_id,
-        )
+        event = gc.create_event(summary=title, start_iso=start_iso, end_iso=end_iso)
         return f"Event added with ID {event.get('id')}"
     except Exception as e:
         logger.error("Error in add_calendar_event tool: %s", e, exc_info=True)
@@ -245,9 +227,14 @@ def delete_calendar_event(ctx: RunContext[FamilySystemContext], event_id: str) -
     """Delete a calendar event by its Google Calendar event ID.
 
     Use the ID shown when listing events with get_calendar.
+    If this event was originally synced from an email extraction,
+    it will also be removed from the local database.
     """
     try:
         gc.delete_event(event_id)
+        ev = event_store.get_event_by_gcal_id(event_id)
+        if ev:
+            event_store.delete_event(ev["id"])
         return f"Event {event_id} deleted."
     except Exception as e:
         logger.error("Error in delete_calendar_event tool: %s", e, exc_info=True)
@@ -255,10 +242,11 @@ def delete_calendar_event(ctx: RunContext[FamilySystemContext], event_id: str) -
 
 @agent.tool
 def update_calendar_event(ctx: RunContext[FamilySystemContext], event_id: str, title: str | None = None, start_iso: str | None = None, end_iso: str | None = None) -> str:
-    """Update an existing calendar event by its Google Calendar event ID.
+    """Update an existing Google Calendar event by its Google Calendar event ID.
 
     Only provided fields will be updated. Omit fields you don't want to change.
     Use the ID shown when listing events with get_calendar.
+    Note: this only updates Google Calendar, not the local email events database.
     """
     try:
         gc.update_event(
@@ -271,6 +259,114 @@ def update_calendar_event(ctx: RunContext[FamilySystemContext], event_id: str, t
     except Exception as e:
         logger.error("Error in update_calendar_event tool: %s", e, exc_info=True)
         return f"Error updating event: {str(e)}"
+
+@agent.tool
+def add_email_event(ctx: RunContext[FamilySystemContext], title: str, start_iso: str, end_iso: str | None = None, email_uid: str | None = None, sync_to_gcal: bool = False) -> str:
+    """Store an event extracted from an email in the local database.
+
+    Use this for ALL dates found in emails. If the event is relevant to the family
+    based on the profile, set sync_to_gcal=True to also publish it to Google Calendar.
+
+    - title: Event title/summary
+    - start_iso: ISO 8601 start datetime (e.g. "2026-06-23T09:00:00Z")
+    - end_iso: Optional ISO 8601 end datetime. If omitted, defaults to None.
+    - email_uid: The UID of the email this event was extracted from.
+    - sync_to_gcal: If True, also creates this event in Google Calendar.
+    """
+    try:
+        source_email_id = None
+        if email_uid:
+            email_data = email_store.get_email_by_uid(email_uid)
+            if email_data:
+                source_email_id = email_data["id"]
+        event_id = event_store.add_event(title, start_iso, end_iso, source_email_id)
+        if sync_to_gcal:
+            gcal_event = gc.create_event(
+                summary=title,
+                start_iso=start_iso,
+                end_iso=end_iso,
+                source_email_id=source_email_id,
+            )
+            gcal_id = gcal_event.get("id")
+            event_store.mark_synced(event_id, gcal_id)
+            return f"Event stored with local ID {event_id} and synced to Google Calendar (ID: {gcal_id})"
+        return f"Event stored with local ID {event_id} (local only — use sync_email_event_to_gcal to publish)"
+    except Exception as e:
+        logger.error("Error in add_email_event tool: %s", e, exc_info=True)
+        return f"Error adding email event: {str(e)}"
+
+@agent.tool
+def sync_email_event_to_gcal(ctx: RunContext[FamilySystemContext], event_id: int) -> str:
+    """Publish a locally-stored email event to Google Calendar.
+
+    Use this when the AI skipped syncing an event and the user wants it published.
+    Returns an error if the event is already synced.
+
+    - event_id: The local database ID returned by add_email_event.
+    """
+    try:
+        ev = event_store.get_event(event_id)
+        if not ev:
+            return f"Event {event_id} not found."
+        if ev["synced_to_gcal"] and ev["google_event_id"]:
+            return f"Event {event_id} is already synced to Google Calendar (ID: {ev['google_event_id']})"
+        ev_title = ev["title"]
+        ev_start = ev["start_iso"]
+        ev_end = ev["end_iso"]
+        gcal_event = gc.create_event(
+            summary=ev_title,
+            start_iso=ev_start,
+            end_iso=ev_end,
+            source_email_id=ev["source_email_id"],
+        )
+        gcal_id = gcal_event.get("id")
+        event_store.mark_synced(event_id, gcal_id)
+        return f"Event {event_id} synced to Google Calendar (ID: {gcal_id})"
+    except Exception as e:
+        logger.error("Error in sync_email_event_to_gcal tool: %s", e, exc_info=True)
+        return f"Error syncing event: {str(e)}"
+
+@agent.tool
+def list_email_events(ctx: RunContext[FamilySystemContext]) -> str:
+    """List all upcoming email-extracted events from the local database.
+
+    Shows sync status: ✅ = synced to Google Calendar, 📋 = local only.
+    """
+    try:
+        events = event_store.get_future_events(days=90)
+        if not events:
+            return "No email-extracted events stored."
+        lines = ["Email-extracted events (next 90 days):"]
+        for ev in events:
+            badge = "✅" if ev["synced_to_gcal"] else "📋"
+            lines.append(f"- {badge} {ev['title']} at {ev['start_iso']} (ID: {ev['id']})")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("Error in list_email_events tool: %s", e, exc_info=True)
+        return f"Error listing email events: {str(e)}"
+
+@agent.tool
+def remove_email_event(ctx: RunContext[FamilySystemContext], event_id: int) -> str:
+    """Delete an email-extracted event from the local database.
+
+    If it was also synced to Google Calendar, it will be removed from there too.
+
+    - event_id: The local database ID returned by add_email_event.
+    """
+    try:
+        ev = event_store.get_event(event_id)
+        if not ev:
+            return f"Event {event_id} not found."
+        if ev["synced_to_gcal"] and ev["google_event_id"]:
+            try:
+                gc.delete_event(ev["google_event_id"])
+            except Exception:
+                pass
+        event_store.delete_event(event_id)
+        return f"Event {event_id} removed."
+    except Exception as e:
+        logger.error("Error in remove_email_event tool: %s", e, exc_info=True)
+        return f"Error removing event: {str(e)}"
 
 @agent.tool
 def clear_thread_memory(ctx: RunContext[FamilySystemContext], before: str | None = None) -> str:
@@ -622,7 +718,6 @@ async def generate_digest_text() -> str:
     last_digest_time = read_last_digest_time()
     if last_digest_time:
         new_emails = email_store.get_emails_since(last_digest_time)
-        new_email_ids = {e["id"] for e in new_emails}
         if new_emails:
             new_emails_str = "\n".join(
                 f"- {e['subject']} (from {e['sender']})" for e in new_emails
@@ -630,14 +725,13 @@ async def generate_digest_text() -> str:
         else:
             new_emails_str = "None"
 
-        events_from_new_emails = [
-            ev for ev in events
-            if _get_source_email_id(ev) in new_email_ids
-        ]
-        if events_from_new_emails:
-            new_events_str = "\n".join(
-                f"- {ev.get('summary', 'Untitled')} at {ev.get('start', {}).get('dateTime', '?')}" for ev in events_from_new_emails
-            )
+        email_events = event_store.get_recent_events(last_digest_time)
+        if email_events:
+            new_events_lines = []
+            for ev in email_events:
+                badge = "✅" if ev["synced_to_gcal"] else "📋"
+                new_events_lines.append(f"- {badge} {ev['title']} at {ev['start_iso']} (ID: {ev['id']})")
+            new_events_str = "\n".join(new_events_lines)
         else:
             new_events_str = "None"
     else:

@@ -5,13 +5,13 @@ Compose a structured summary covering (in order):
 - What's happening this week
 - What's happening next week
 - New emails received since the last digest (subjects listed above)
-- New events that were auto-created from those emails
+- New events that were auto-created from those emails — show sync status:
+  ✅ = synced to Google Calendar, 📋 = local only (not published)
 - An "Other Notable Events" section at the bottom for any events that seem unlikely to be relevant based on the family profile, so they remain visible but are not mixed with urgent items.
 
-
 Be concise, structured, and action-oriented. Make the report look polished. Don't repeat events.
-Skip sections that don't have any data. Just mention there were no emails/events/whatever you have skipped at the end of the repport
-Only include bin collection info if there is a bin collection tomorrow. if it's doday or more than 1 day ahead, skip it.
+Skip sections that don't have any data. Just mention there were no emails/events/whatever you have skipped at the end of the report.
+Only include bin collection info if there is a bin collection tomorrow. If it's today or more than 1 day ahead, skip it.
 Use family profile to determine if an event is relevant or not. 
 
 ## Family Profile
@@ -28,4 +28,3 @@ $events
 
 ## Bin Collection
 $bin_collection
-

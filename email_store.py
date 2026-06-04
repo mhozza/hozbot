@@ -53,6 +53,23 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_attachments_email_id
                 ON attachments(email_id);
+
+            CREATE TABLE IF NOT EXISTS email_events (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                title           TEXT    NOT NULL,
+                start_iso       TEXT    NOT NULL,
+                end_iso         TEXT,
+                source_email_id INTEGER REFERENCES emails(id),
+                synced_to_gcal  INTEGER NOT NULL DEFAULT 0,
+                google_event_id TEXT,
+                created_at      TEXT    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_email_events_start_iso
+                ON email_events(start_iso);
+            CREATE INDEX IF NOT EXISTS idx_email_events_source_email_id
+                ON email_events(source_email_id);
+            CREATE INDEX IF NOT EXISTS idx_email_events_google_event_id
+                ON email_events(google_event_id);
         """)
     logger.info("Database initialised at %s", DB_PATH)
 
