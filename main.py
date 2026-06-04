@@ -46,6 +46,8 @@ SEND_HI_BYE_USER_IDS = [
     if uid.strip().isdigit()
 ]
 
+SEND_DIGEST_ON_START = os.getenv("SEND_DIGEST_ON_START", "false").lower() == "true"
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
 
@@ -855,11 +857,12 @@ def main() -> None:
         logger.info(f"Scheduled evening digest at {digest_time_str}")
 
         # Catch up if digest time already passed today (e.g. restart / sleep after digest time)
-        now = datetime.now()
-        digest_datetime = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if now >= digest_datetime:
-            application.job_queue.run_once(evening_digest_job, when=5, job_kwargs={"misfire_grace_time": 86400})
-            logger.info("Scheduling catch-up evening digest (missed today)")
+        if SEND_DIGEST_ON_START:
+            now = datetime.now()
+            digest_datetime = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if now >= digest_datetime:
+                application.job_queue.run_once(evening_digest_job, when=5, job_kwargs={"misfire_grace_time": 86400})
+                logger.info("Scheduling catch-up evening digest (missed today)")
 
     # Send startup hello
     application.job_queue.run_once(startup_hello_job, when=5)

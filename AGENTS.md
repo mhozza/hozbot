@@ -42,6 +42,7 @@ The Dockerfile uses a multi-stage build with `ghcr.io/astral-sh/uv:python3.13-al
 | `EMAIL_CHECK_ENABLED` | Enable/disable periodic email checks (default: true) |
 | `DIGEST_TIME` | Time for evening digest (default: 19:00) |
 | `DIGEST_ENABLED` | Enable/disable evening digest (default: true) |
+| `SEND_DIGEST_ON_START` | Send catch-up digest on startup if digest time already passed (default: false) |
 | `SEND_HI_BYE` | Comma-separated Telegram user IDs for startup/shutdown notifications (default: empty, disabled) |
 | `BIN_UPRN` | UPRN for bin collection lookups (see tools/get_uprn.py) |
 
