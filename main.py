@@ -37,6 +37,7 @@ ALLOWED_USER_IDS = [
     for uid in ALLOWED_USER_IDS_STR.split(",")
     if uid.strip().isdigit()
 ]
+memory.BROADCAST_USER_IDS = ALLOWED_USER_IDS
 
 # Parse send hi/bye user IDs (separate from the auth whitelist)
 SEND_HI_BYE_STR = os.getenv("SEND_HI_BYE", "")
@@ -468,7 +469,7 @@ def extract_pdf_file(ctx: RunContext[FamilySystemContext], file_path: str) -> st
 async def get_daily_digest(ctx: RunContext[FamilySystemContext]) -> str:
     """Generate the daily briefing with upcoming events, new emails since last digest, and events created from those emails. Does not update the digest watermark."""
     try:
-        return await generate_digest_text()
+        return await generate_digest_text(uid=ctx.deps.user_id)
     except Exception as e:
         logger.error(f"Error generating daily digest: {e}", exc_info=True)
         return f"Error generating daily digest: {str(e)}"
@@ -480,6 +481,21 @@ def check_bin_collection() -> str:
     Reads the BIN_UPRN environment variable to look up the schedule.
     """
     return bin_collection.check_schedule()
+
+
+async def run_agent(prompt, deps, uid: int | None):
+    """Run agent.run(), log prompt + response to memory, return reply text."""
+    response = await agent.run(prompt, deps=deps)
+    reply_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
+
+    if isinstance(prompt, str):
+        prompt_text = prompt
+    else:
+        prompt_text = " ".join(str(p) for p in prompt if isinstance(p, str)) or "[Media]"
+    memory.add_message(uid, prompt_text)
+    memory.add_message(uid, reply_text)
+
+    return reply_text
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -541,16 +557,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     try:
-        response = await agent.run(prompt, deps=sys_ctx)
-
-        reply_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
+        reply_text = await run_agent(prompt, deps=sys_ctx, uid=user.id)
 
         if update.message:
             await safe_reply(update.message, reply_text)
-
-        memory_label = text if text else "[Media]"
-        memory.add_message(user.id, memory_label)
-        memory.add_message(user.id, reply_text)
     except Exception as e:
         logger.error(f"Failed to process request with agent: {e}", exc_info=True)
         if update.message:
@@ -638,8 +648,7 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         prompt = EMAIL_CHECK_TEMPLATE.safe_substitute(email_summary=email_summary)
 
-        response = await agent.run(prompt, deps=system_ctx)
-        reply_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
+        reply_text = await run_agent(prompt, deps=system_ctx, uid=None)
 
         logger.info("Email check agent response:\n%s", reply_text)
 
@@ -676,7 +685,7 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.error(f"Failed to send error notification to user {uid}: {send_err}")
 
 
-async def generate_digest_text() -> str:
+async def generate_digest_text(uid: int | None = None) -> str:
     """Build the digest prompt, run the AI agent, and return the briefing text."""
     now = datetime.now(timezone.utc)
     today_str = now.strftime("%A, %Y-%m-%d")
@@ -757,14 +766,13 @@ async def generate_digest_text() -> str:
         bin_collection=bin_collection.check_schedule(),
     )
 
-    response = await agent.run(prompt, deps=system_ctx)
-    return getattr(response, "output", None) or getattr(response, "data", None) or str(response)
+    return await run_agent(prompt, deps=system_ctx, uid=uid)
 
 
 async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Evening digest: starting")
     try:
-        digest_text = await generate_digest_text()
+        digest_text = await generate_digest_text(uid=None)
 
         for uid in ALLOWED_USER_IDS:
             try:

@@ -12,6 +12,9 @@ MEMORY_FILE = os.path.join(STORAGE_DIR, "thread_memory.json")
 MEMORY_WINDOW_MINUTES = 60
 MAX_MESSAGES = 100
 
+# Set by main.py: list of user IDs to broadcast to when uid=None
+BROADCAST_USER_IDS: list[int] = []
+
 
 def _load_memory() -> Dict[str, list]:
     if not os.path.exists(MEMORY_FILE):
@@ -48,14 +51,20 @@ def get_memory(user_id: int) -> List[str]:
     ]
 
 
-def add_message(user_id: int, message: str) -> None:
+def add_message(user_id: int | None, message: str) -> None:
     data = _load_memory()
-    user_key = str(user_id)
-    msgs = data.get(user_key, [])
-    msgs.append({"text": message, "ts": datetime.now(timezone.utc).isoformat()})
-    if len(msgs) > MAX_MESSAGES:
-        msgs = msgs[-MAX_MESSAGES:]
-    data[user_key] = msgs
+    now_ts = datetime.now(timezone.utc).isoformat()
+
+    target_ids = BROADCAST_USER_IDS if user_id is None else [user_id]
+
+    for uid in target_ids:
+        user_key = str(uid)
+        msgs = data.get(user_key, [])
+        msgs.append({"text": message, "ts": now_ts})
+        if len(msgs) > MAX_MESSAGES:
+            msgs = msgs[-MAX_MESSAGES:]
+        data[user_key] = msgs
+
     _save_memory(data)
 
 
