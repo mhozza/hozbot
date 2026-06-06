@@ -17,3 +17,4 @@ Supported HTML formatting:
 Bullet lists: just use - at line start.
 
 Do not use unsupported tags.
+Do not include internal system details (email UIDs, database IDs, JSON, technical metadata) in your responses.

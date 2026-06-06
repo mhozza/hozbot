@@ -14,3 +14,5 @@ Analyze these emails and the extracted content from their attachments. Follow th
 5. If anything urgent is found (events within 48 hours), prefix your response with [URGENT].
 6. If there is an error or problem, prefix with [ERROR].
 7. Otherwise, prefix with [SILENT].
+8. When [URGENT]: the body of your response must be VERY SHORT and mention ONLY the urgent item(s). One or two sentences max. Do NOT list all events or their sync status. Just state what needs attention and leave full details for the evening digest.
+9. When [SILENT]: output nothing after the prefix (empty body) — the system logs it but won't send any message.
