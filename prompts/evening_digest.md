@@ -5,8 +5,9 @@ Compose a structured summary covering (in order):
 - What's happening this week
 - What's happening next week
 - New emails received since the last digest (subjects listed above)
-- New events that were auto-created from those emails — show sync status:
+- New & updated events from those emails — show sync status:
   ✅ = synced to Google Calendar, 📋 = local only (not published)
+  Mark updated events with 🔄 and a brief note (e.g. "time updated from new email")
 - An "Other Notable Events" section at the bottom for any events that seem unlikely to be relevant based on the family profile, so they remain visible but are not mixed with urgent items.
 
 Be concise, structured, and action-oriented. Make the report look polished. Don't repeat events.

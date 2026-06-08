@@ -330,16 +330,21 @@ def sync_email_event_to_gcal(ctx: RunContext[FamilySystemContext], event_id: int
         return f"Error syncing event: {str(e)}"
 
 @agent.tool
-def list_email_events(ctx: RunContext[FamilySystemContext]) -> str:
-    """List all upcoming email-extracted events from the local database.
-
+def list_email_events(ctx: RunContext[FamilySystemContext], date: str | None = None, title: str | None = None) -> str:
+    """List upcoming email-extracted events from the local database.
+    Optionally filter by date (YYYY-MM-DD) and/or title (substring match, case-insensitive).
     Shows sync status: ✅ = synced to Google Calendar, 📋 = local only.
     """
     try:
         events = event_store.get_future_events(days=90)
+        if date:
+            events = [ev for ev in events if ev["start_iso"].startswith(date)]
+        if title:
+            title_lower = title.lower()
+            events = [ev for ev in events if title_lower in ev["title"].lower()]
         if not events:
-            return "No email-extracted events stored."
-        lines = ["Email-extracted events (next 90 days):"]
+            return "No email-extracted events matching your criteria."
+        lines = ["Email-extracted events:"]
         for ev in events:
             badge = "✅" if ev["synced_to_gcal"] else "📋"
             lines.append(f"- {badge} {ev['title']} at {ev['start_iso']} (ID: {ev['id']})")
@@ -370,6 +375,33 @@ def remove_email_event(ctx: RunContext[FamilySystemContext], event_id: int) -> s
     except Exception as e:
         logger.error("Error in remove_email_event tool: %s", e, exc_info=True)
         return f"Error removing event: {str(e)}"
+
+@agent.tool
+def update_email_event(ctx: RunContext[FamilySystemContext], event_id: int, title: str | None = None, start_iso: str | None = None, end_iso: str | None = None) -> str:
+    """Update an existing email-extracted event's title, start, and/or end time.
+    If the event was synced to Google Calendar, the change is pushed there too.
+
+    - event_id: The local database ID of the event to update.
+    - title: New title (optional — omit to keep current).
+    - start_iso: New start ISO datetime (optional).
+    - end_iso: New end ISO datetime (optional).
+    """
+    try:
+        ev = event_store.get_event(event_id)
+        if not ev:
+            return f"Event {event_id} not found."
+        event_store.update_event(event_id, title=title, start_iso=start_iso, end_iso=end_iso)
+        if ev["synced_to_gcal"] and ev["google_event_id"]:
+            gc.update_event(
+                event_id=ev["google_event_id"],
+                summary=title or ev["title"],
+                start_iso=start_iso or ev["start_iso"],
+                end_iso=end_iso or ev["end_iso"],
+            )
+        return f"Event {event_id} updated."
+    except Exception as e:
+        logger.error("Error in update_email_event tool: %s", e, exc_info=True)
+        return f"Error updating event: {str(e)}"
 
 @agent.tool
 def clear_thread_memory(ctx: RunContext[FamilySystemContext], before: str | None = None) -> str:

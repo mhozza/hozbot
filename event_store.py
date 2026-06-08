@@ -79,3 +79,29 @@ def get_event_by_gcal_id(google_event_id: str) -> dict[str, Any] | None:
             (google_event_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def find_events_by_title_date(title: str, start_iso: str) -> list[dict[str, Any]]:
+    title_lower = title.lower()
+    with _get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM email_events WHERE date(start_iso) = date(?) ORDER BY start_iso",
+            (start_iso,),
+        ).fetchall()
+    results = [dict(r) for r in rows]
+    return [
+        ev for ev in results
+        if title_lower in ev["title"].lower() or ev["title"].lower() in title_lower
+    ]
+
+
+def update_event(event_id: int, **kwargs: Any) -> bool:
+    allowed = {"title", "start_iso", "end_iso", "source_email_id"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
+    if not fields:
+        return False
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [event_id]
+    with _get_connection() as conn:
+        conn.execute(f"UPDATE email_events SET {set_clause} WHERE id = ?", values)
+        return conn.rowcount > 0
