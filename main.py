@@ -795,7 +795,7 @@ async def generate_digest_text(uid: int | None = None) -> str:
         events=event_section,
         new_emails=new_emails_str,
         new_events_from_emails=new_events_str,
-        bin_collection=bin_collection.check_schedule(),
+        bin_collection=bin_collection.get_tomorrows_collections(),
     )
 
     return await run_agent(prompt, deps=system_ctx, uid=uid)

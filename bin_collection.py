@@ -17,7 +17,7 @@ Usage:
 import os
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 import requests
 
@@ -193,6 +193,44 @@ def format_bin_schedule(services: list[dict]) -> str:
         "St Albans rubbish collections</a>"
     )
 
+    return "\n".join(lines)
+
+
+def get_tomorrows_collections() -> str:
+    """Return a formatted string for bin collections happening tomorrow, or empty string if none.
+
+    Digest-ready: the caller can pass this directly into the prompt template.
+    """
+    uprn = os.getenv("BIN_UPRN", "")
+    if not uprn:
+        return ""
+    try:
+        services = get_bin_schedule(uprn)
+    except Exception:
+        return ""
+
+    now = datetime.now(timezone.utc)
+    tomorrow_start = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+    tomorrow_bins: list[str] = []
+    for svc in services:
+        for h in svc.get("ServiceHeaders", []):
+            try:
+                next_dt = datetime.fromisoformat(h["Next"])
+                if next_dt.tzinfo is None:
+                    next_dt = next_dt.replace(tzinfo=timezone.utc)
+                next_date = next_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                if next_date == tomorrow_start:
+                    tomorrow_bins.append(_friendly_name(h.get("TaskType", "?")))
+            except (ValueError, KeyError):
+                continue
+
+    if not tomorrow_bins:
+        return ""
+
+    lines = ["<b>🗑️ Bin Collection tomorrow</b>"]
+    for bin_name in tomorrow_bins:
+        lines.append(f"  • {bin_name}")
     return "\n".join(lines)
 
 
