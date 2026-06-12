@@ -10,6 +10,7 @@ Compose a structured summary covering (in order):
 - New & updated events from those emails — show sync status:
   ✅ = synced to Google Calendar, 📋 = local only (not published)
   Mark updated events with 🔄 and a brief note (e.g. "time updated from new email")
+- Events that were found in emails but skipped because they already exist on a shared calendar (if any)
 - An "Other Notable Events" section at the bottom for any events that seem unlikely to be relevant based on the family profile, so they remain visible but are not mixed with urgent items.
 
 Be concise, structured, and action-oriented. Make the report look polished. Don't repeat events.
@@ -24,6 +25,9 @@ $new_emails
 
 ## New Events Created from Emails
 $new_events_from_emails
+
+## Skipped Events (already exist on shared calendars)
+$skipped_events
 
 ## Upcoming Events (from calendar)
 $events

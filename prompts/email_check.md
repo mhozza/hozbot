@@ -10,10 +10,11 @@ Analyze these emails and the extracted content from their attachments. Follow th
 
 1. Use get_profile to check our family profile for context on what's relevant.
 2. For EVERY date, event, or deadline you find, store it in the local database:
-   a. First, call list_email_events(date="YYYY-MM-DD", title="keyword") to check if the same real-world event already exists.
-   b. If an existing event matches (same date + same event, even if wording differs), call update_email_event to merge the new info (title, time).
-   c. If it's a genuinely different event (concurrent session, recurring instance, truly separate), call add_email_event as normal.
-   d. Mention in your response whether each event was created or updated.
+   a. First, call list_email_events(date="YYYY-MM-DD", title="keyword", check_gcal=True) to check if the same real-world event already exists in the local database OR any shared Google Calendar.
+   b. If an existing event matches (same date + same event, even if wording differs) in the local database, call update_email_event to merge the new info (title, time).
+   c. If a matching event already exists on a shared Google Calendar, call note_event_skipped(title="...", date="YYYY-MM-DD") and do NOT create a duplicate. Do not call add_email_event for it.
+   d. If it's a genuinely different event (concurrent session, recurring instance, truly separate) that does NOT exist on any calendar, call add_email_event as normal.
+   e. Mention in your response whether each event was created, updated, or skipped (and why).
 3. Then evaluate each event for relevance:
    - If the event is relevant to the family (child's school event, family member's appointment, local activity), use sync_email_event_to_gcal to publish it to Google Calendar.
    - If clearly irrelevant (marketing email for someone else, event in another city), leave it unsynced — it stays in the database but won't clutter the calendar.

@@ -53,6 +53,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
 
 LAST_DIGEST_PATH = os.path.join(BASE_DIR, "storage", "last_digest.json")
+SKIPPED_EVENTS_PATH = os.path.join(BASE_DIR, "storage", "skipped_events.json")
 
 
 def read_last_digest_time() -> str | None:
@@ -200,10 +201,10 @@ def add_fact_tool(ctx: RunContext[FamilySystemContext], note: str) -> str:
 
 @agent.tool
 def get_calendar(ctx: RunContext[FamilySystemContext]) -> str:
-    """Return the list of upcoming calendar events (next 90 days)."""
+    """Return the list of upcoming calendar events (next 90 days) from all accessible calendars."""
     try:
         now = datetime.now(timezone.utc)
-        events = gc.list_events(now, now + timedelta(days=90))
+        events = gc.list_all_events(now, now + timedelta(days=90))
         if not events:
             return "No events scheduled."
         lines = ["Upcoming events (next 90 days):"]
@@ -211,7 +212,8 @@ def get_calendar(ctx: RunContext[FamilySystemContext]) -> str:
             title = ev.get("summary", "Untitled")
             start = ev.get("start", {}).get("dateTime", "?")
             event_id = ev.get("id", "?")
-            lines.append(f"- {title} at {start} (ID: {event_id})")
+            cal = ev.get("_calendar_summary", "primary")
+            lines.append(f"- [{cal}] {title} at {start} (ID: {event_id})")
         return "\n".join(lines)
     except Exception as e:
         logger.error("Error in get_calendar tool: %s", e, exc_info=True)
@@ -337,10 +339,11 @@ def sync_email_event_to_gcal(ctx: RunContext[FamilySystemContext], event_id: int
         return f"Error syncing event: {str(e)}"
 
 @agent.tool
-def list_email_events(ctx: RunContext[FamilySystemContext], date: str | None = None, title: str | None = None) -> str:
+def list_email_events(ctx: RunContext[FamilySystemContext], date: str | None = None, title: str | None = None, check_gcal: bool = False) -> str:
     """List upcoming email-extracted events from the local database.
     Optionally filter by date (YYYY-MM-DD) and/or title (substring match, case-insensitive).
     Shows sync status: ✅ = synced to Google Calendar, 📋 = local only.
+    When check_gcal=True, also searches events across ALL shared Google Calendars and includes them.
     """
     try:
         events = event_store.get_future_events(days=90)
@@ -349,12 +352,30 @@ def list_email_events(ctx: RunContext[FamilySystemContext], date: str | None = N
         if title:
             title_lower = title.lower()
             events = [ev for ev in events if title_lower in ev["title"].lower()]
-        if not events:
-            return "No email-extracted events matching your criteria."
+
         lines = ["Email-extracted events:"]
         for ev in events:
             badge = "✅" if ev["synced_to_gcal"] else "📋"
             lines.append(f"- {badge} {ev['title']} at {ev['start_iso']} (ID: {ev['id']})")
+
+        if check_gcal and (date or title):
+            now = datetime.now(timezone.utc)
+            gcal_events = gc.list_all_events(now, now + timedelta(days=90))
+            if date:
+                gcal_events = [ev for ev in gcal_events if ev.get("start", {}).get("dateTime", "").startswith(date)]
+            if title:
+                title_lower = title.lower()
+                gcal_events = [ev for ev in gcal_events if title_lower in ev.get("summary", "").lower()]
+            if gcal_events:
+                lines.append("\nMatching events on shared calendars:")
+                for ev in gcal_events:
+                    title_s = ev.get("summary", "Untitled")
+                    start_s = ev.get("start", {}).get("dateTime", "?")
+                    cal = ev.get("_calendar_summary", "?")
+                    lines.append(f"- [{cal}] {title_s} at {start_s}")
+
+        if len(lines) == 1:
+            return "No email-extracted events matching your criteria."
         return "\n".join(lines)
     except Exception as e:
         logger.error("Error in list_email_events tool: %s", e, exc_info=True)
@@ -409,6 +430,36 @@ def update_email_event(ctx: RunContext[FamilySystemContext], event_id: int, titl
     except Exception as e:
         logger.error("Error in update_email_event tool: %s", e, exc_info=True)
         return f"Error updating event: {str(e)}"
+
+@agent.tool
+def note_event_skipped(ctx: RunContext[FamilySystemContext], title: str, date: str, reason: str = "already exists on a shared calendar") -> str:
+    """Record an event that was found in an email but not added because it already exists elsewhere.
+
+    This is used to track events skipped during email processing so the evening
+    digest can mention them.
+
+    - title: Event title/summary
+    - date: Event date (YYYY-MM-DD)
+    - reason: Why it was skipped (defaults to "already exists on a shared calendar")
+    """
+    try:
+        skipped: list[dict] = []
+        if os.path.exists(SKIPPED_EVENTS_PATH):
+            with open(SKIPPED_EVENTS_PATH) as f:
+                skipped = json.load(f)
+        skipped.append({
+            "title": title,
+            "date": date,
+            "reason": reason,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        os.makedirs(os.path.dirname(SKIPPED_EVENTS_PATH), exist_ok=True)
+        with open(SKIPPED_EVENTS_PATH, "w") as f:
+            json.dump(skipped, f, indent=2)
+        return f"Skipped event noted: {title} on {date} ({reason})"
+    except Exception as e:
+        logger.error("Error in note_event_skipped tool: %s", e, exc_info=True)
+        return f"Error noting skipped event: {str(e)}"
 
 @agent.tool
 def clear_thread_memory(ctx: RunContext[FamilySystemContext], before: str | None = None) -> str:
@@ -737,7 +788,7 @@ async def generate_digest_text(uid: int | None = None) -> str:
     now = datetime.now(timezone.utc)
     today_str = now.strftime("%A, %Y-%m-%d")
 
-    events = gc.list_events(now, now + timedelta(days=30))
+    events = gc.list_all_events(now, now + timedelta(days=30))
     parsed = []
     for ev in events:
         start_str = ev.get("start", {}).get("dateTime")
@@ -761,7 +812,8 @@ async def generate_digest_text(uid: int | None = None) -> str:
         s = "s" if len(cluster) > 1 else ""
         lines = [f"{label}: ({len(cluster)} event{s})"]
         for ev in cluster:
-            lines.append(f"- {ev.get('summary', 'Untitled')} at {ev.get('start', {}).get('dateTime', '?')}")
+            cal = ev.get("_calendar_summary", "primary")
+            lines.append(f"- [{cal}] {ev.get('summary', 'Untitled')} at {ev.get('start', {}).get('dateTime', '?')}")
         return "\n".join(lines)
 
     event_section = "\n\n".join([
@@ -771,6 +823,25 @@ async def generate_digest_text(uid: int | None = None) -> str:
     ])
 
     profile = read_profile()
+
+    # Read skipped events (then clear the file)
+    skipped_events_str = "None"
+    if os.path.exists(SKIPPED_EVENTS_PATH):
+        try:
+            with open(SKIPPED_EVENTS_PATH) as f:
+                skipped = json.load(f)
+            if skipped:
+                lines = ["Skipped events (already exist on a shared calendar):"]
+                for se in skipped:
+                    lines.append(f"- {se['title']} on {se['date']} ({se['reason']})")
+                skipped_events_str = "\n".join(lines)
+            os.remove(SKIPPED_EVENTS_PATH)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error("Error reading skipped events: %s", e)
+            try:
+                os.remove(SKIPPED_EVENTS_PATH)
+            except OSError:
+                pass
 
     # Gather new emails and events since last digest (read-only, no watermark update)
     last_digest_time = read_last_digest_time()
@@ -814,6 +885,7 @@ async def generate_digest_text(uid: int | None = None) -> str:
         events=event_section,
         new_emails=new_emails_str,
         new_events_from_emails=new_events_str,
+        skipped_events=skipped_events_str,
         bin_collection=bin_collection.get_tomorrows_collections(),
         local_tz=LOCAL_TZ_NAME,
         local_offset=local_offset_iso,

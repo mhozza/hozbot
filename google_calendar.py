@@ -137,11 +137,22 @@ class GoogleCalendar:
         if self.service is None:
             raise RuntimeError("GoogleCalendar not authenticated. Call auth_console() first.")
 
+    def list_calendars(self) -> list[dict[str, Any]]:
+        """List all calendars accessible to the authenticated account."""
+        self._require_service()
+        try:
+            result = self.service.calendarList().list().execute()
+            return result.get("items", [])
+        except HttpError as e:
+            logger.error("Google Calendar API error listing calendars: %s", e)
+            raise
+
     def list_events(
         self,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
         max_results: int = 250,
+        calendar_id: str | None = None,
     ) -> list[dict[str, Any]]:
         self._require_service()
         if time_min is None:
@@ -149,8 +160,9 @@ class GoogleCalendar:
         if time_max is None:
             time_max = time_min + timedelta(days=90)
 
+        cal_id = calendar_id or self.calendar_id
         params = {
-            "calendarId": self.calendar_id,
+            "calendarId": cal_id,
             "timeMin": time_min.isoformat(),
             "timeMax": time_max.isoformat(),
             "maxResults": max_results,
@@ -163,6 +175,43 @@ class GoogleCalendar:
         except HttpError as e:
             logger.error("Google Calendar API error listing events: %s", e)
             raise
+
+    def list_all_events(
+        self,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
+        max_results: int = 250,
+    ) -> list[dict[str, Any]]:
+        """List events from ALL accessible calendars, merged and sorted by start time.
+
+        Each event gets a `_calendar_summary` key with the display name of the
+        calendar it came from.
+        """
+        self._require_service()
+        if time_min is None:
+            time_min = datetime.now(timezone.utc)
+        if time_max is None:
+            time_max = time_min + timedelta(days=90)
+
+        calendars = self.list_calendars()
+        all_events: list[dict[str, Any]] = []
+        for cal in calendars:
+            try:
+                events = self.list_events(
+                    time_min=time_min,
+                    time_max=time_max,
+                    max_results=max_results,
+                    calendar_id=cal["id"],
+                )
+                cal_name = cal.get("summary", cal["id"])
+                for ev in events:
+                    ev["_calendar_summary"] = cal_name
+                all_events.extend(events)
+            except HttpError:
+                continue
+
+        all_events.sort(key=lambda e: e.get("start", {}).get("dateTime", ""))
+        return all_events
 
     def create_event(
         self,
