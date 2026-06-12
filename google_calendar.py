@@ -3,6 +3,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from google.auth.transport.requests import Request
@@ -15,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 DEFAULT_EVENT_DURATION_MINUTES = 60
+
+LOCAL_TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/London"))
+LOCAL_TZ_NAME = os.getenv("TIMEZONE", "Europe/London")
 
 
 class GoogleCalendar:
@@ -178,8 +182,8 @@ class GoogleCalendar:
 
         body = {
             "summary": summary,
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": "UTC"},
-            "end": {"dateTime": end_dt.isoformat(), "timeZone": "UTC"},
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": LOCAL_TZ_NAME},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": LOCAL_TZ_NAME},
         }
         if description:
             body["description"] = description
@@ -223,9 +227,9 @@ class GoogleCalendar:
         if summary is not None:
             event["summary"] = summary
         if start_iso is not None:
-            event["start"] = {"dateTime": _parse_iso(start_iso).isoformat(), "timeZone": "UTC"}
+            event["start"] = {"dateTime": _parse_iso(start_iso).isoformat(), "timeZone": LOCAL_TZ_NAME}
         if end_iso is not None:
-            event["end"] = {"dateTime": _parse_iso(end_iso).isoformat(), "timeZone": "UTC"}
+            event["end"] = {"dateTime": _parse_iso(end_iso).isoformat(), "timeZone": LOCAL_TZ_NAME}
         if description is not None:
             event["description"] = description
 
@@ -265,7 +269,7 @@ def _parse_iso(iso_str: str) -> datetime:
     cleaned = iso_str.replace("Z", "+00:00")
     dt = datetime.fromisoformat(cleaned)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=LOCAL_TZ)
     return dt
 
 

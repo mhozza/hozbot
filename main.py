@@ -92,7 +92,7 @@ from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
 from pydantic_ai.models.fallback import FallbackModel
-from google_calendar import GoogleCalendar, migrate_from_json, _parse_iso
+from google_calendar import GoogleCalendar, migrate_from_json, _parse_iso, LOCAL_TZ, LOCAL_TZ_NAME
 import database as db_mod
 import event_store
 
@@ -139,6 +139,13 @@ def add_recent_conversation(ctx: RunContext[FamilySystemContext]) -> str:
         speaker = "User" if i % 2 == 0 else "Hozbot"
         lines.append(f"  {speaker}: {msg}")
     return "\n".join(lines)
+
+@agent.system_prompt
+def add_timezone_info() -> str:
+    now = datetime.now(LOCAL_TZ)
+    off = now.strftime("%z")
+    offset_iso = f"{off[:3]}:{off[3:]}"
+    return f"\n# Timezone\nThe bot operates in {LOCAL_TZ_NAME} (current UTC offset {offset_iso}). All dates and times mentioned are in this timezone unless otherwise specified."
 
 @agent.tool
 def check_shared_inbox(ctx: RunContext[FamilySystemContext]) -> str:
@@ -215,7 +222,7 @@ def add_calendar_event(ctx: RunContext[FamilySystemContext], title: str, start_i
     """Add a new event directly to the Google Calendar.
 
     - title: Event title/summary
-    - start_iso: ISO 8601 start datetime (e.g. "2026-06-23T09:00:00Z")
+    - start_iso: ISO 8601 start datetime in the local timezone (e.g. "2026-06-23T09:00:00+01:00"). If timezone is omitted, local timezone is assumed.
     - end_iso: Optional ISO 8601 end datetime. If omitted, defaults to 1 hour after start.
     """
     try:
@@ -271,7 +278,7 @@ def add_email_event(ctx: RunContext[FamilySystemContext], title: str, start_iso:
     based on the profile, set sync_to_gcal=True to also publish it to Google Calendar.
 
     - title: Event title/summary
-    - start_iso: ISO 8601 start datetime (e.g. "2026-06-23T09:00:00Z")
+    - start_iso: ISO 8601 start datetime in the local timezone (e.g. "2026-06-23T09:00:00+01:00"). If timezone is omitted, local timezone is assumed.
     - end_iso: Optional ISO 8601 end datetime. If omitted, defaults to None.
     - email_uid: The UID of the email this event was extracted from.
     - sync_to_gcal: If True, also creates this event in Google Calendar.
@@ -421,7 +428,7 @@ def clear_thread_memory(ctx: RunContext[FamilySystemContext], before: str | None
 @agent.tool_plain
 def get_current_datetime() -> str:
     """Return the current date and time in the local timezone."""
-    now = datetime.now().astimezone()
+    now = datetime.now(LOCAL_TZ)
     return now.strftime("%A, %Y-%m-%d %H:%M:%S %Z")
 
 @agent.tool
@@ -678,7 +685,15 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             thread_memory=[],
         )
 
-        prompt = EMAIL_CHECK_TEMPLATE.safe_substitute(email_summary=email_summary)
+        now_local = datetime.now(LOCAL_TZ)
+        off = now_local.strftime("%z")
+        local_offset_iso = f"{off[:3]}:{off[3:]}"
+
+        prompt = EMAIL_CHECK_TEMPLATE.safe_substitute(
+            email_summary=email_summary,
+            local_tz=LOCAL_TZ_NAME,
+            local_offset=local_offset_iso,
+        )
 
         reply_text = await run_agent(prompt, deps=system_ctx, uid=None)
 
@@ -789,6 +804,10 @@ async def generate_digest_text(uid: int | None = None) -> str:
         thread_memory=[],
     )
 
+    now_local = datetime.now(LOCAL_TZ)
+    off = now_local.strftime("%z")
+    local_offset_iso = f"{off[:3]}:{off[3:]}"
+
     prompt = EVENING_DIGEST_TEMPLATE.safe_substitute(
         today_date=today_str,
         profile=json.dumps(profile, indent=2),
@@ -796,6 +815,8 @@ async def generate_digest_text(uid: int | None = None) -> str:
         new_emails=new_emails_str,
         new_events_from_emails=new_events_str,
         bin_collection=bin_collection.get_tomorrows_collections(),
+        local_tz=LOCAL_TZ_NAME,
+        local_offset=local_offset_iso,
     )
 
     return await run_agent(prompt, deps=system_ctx, uid=uid)

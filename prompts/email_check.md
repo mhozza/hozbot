@@ -2,6 +2,10 @@ New emails found in the shared inbox with extracted attachment content:
 
 $email_summary
 
+## Timezone
+Local timezone: $local_tz (current UTC offset $local_offset).
+Dates in emails are in this timezone. When outputting ISO dates, you can include the offset (e.g. "$local_offset") or omit it — the system assumes $local_tz for unqualified dates.
+
 Analyze these emails and the extracted content from their attachments. Follow these rules:
 
 1. Use get_profile to check our family profile for context on what's relevant.

@@ -1,5 +1,7 @@
 Generate the evening family briefing for $today_date.
 
+Local timezone: $local_tz ($local_offset).
+
 Compose a structured summary covering (in order):
 - Any items needing urgent attention (i.e. in next 48 hours, or other reasons). Include bin collection here if $bin_collection is non-empty.
 - What's happening this week
