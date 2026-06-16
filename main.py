@@ -161,6 +161,17 @@ def add_timezone_info() -> str:
     offset_iso = f"{off[:3]}:{off[3:]}"
     return f"\n# Timezone\nThe bot operates in {LOCAL_TZ_NAME} (current UTC offset {offset_iso}). All dates and times mentioned are in this timezone unless otherwise specified."
 
+@agent.system_prompt
+def add_profile_context() -> str:
+    profile = read_profile()
+    notes = profile.get("critical_notes", [])
+    if not notes:
+        return ""
+    lines = ["\n# Family profile (learned preferences & facts)"]
+    for i, note in enumerate(notes, 1):
+        lines.append(f"  {i}. {note}")
+    return "\n".join(lines)
+
 @agent.tool
 def check_shared_inbox(ctx: RunContext[FamilySystemContext]) -> str:
     """Fetch and summarize unread emails in the shared family office inbox.
@@ -203,14 +214,16 @@ def get_profile(ctx: RunContext[FamilySystemContext]) -> str:
     return json.dumps(profile, indent=2)
 
 @agent.tool
-def add_fact_tool(ctx: RunContext[FamilySystemContext], note: str) -> str:
-    """Add a critical note to the family profile.
+def remember_this(ctx: RunContext[FamilySystemContext], note: str) -> str:
+    """Store a note, preference, or fact for future reference.
 
-    The `ctx` parameter provides execution context and is required by the tool schema.
+    Use this when the user tells you something they want you to remember —
+    e.g. what they care about, what to ignore, response style preferences,
+    or anything that should influence future behaviour.
+    These notes are shown to you on every conversation turn.
     """
-    # Context is currently unused but retained for compliance with tool schema requirements.
     append_fact(note)
-    return "Fact added to profile."
+    return "Noted."
 
 @agent.tool
 def get_calendar(ctx: RunContext[FamilySystemContext]) -> str:

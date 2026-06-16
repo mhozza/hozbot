@@ -83,7 +83,7 @@ hozbot/
 - Users send messages to a Telegram bot
 - The bot validates against `ALLOWED_USER_IDS` (whitelist)
 - A `pydantic-ai` Agent receives the message with `FallbackModel` (primary → fallback Gemini model)
-- The agent has access to tools: `check_shared_inbox`, `get_profile`, `add_fact_tool`, `get_calendar`, `add_calendar_event`, `delete_calendar_event`, `update_calendar_event`, `add_email_event`, `sync_email_event_to_gcal`, `list_email_events`, `remove_email_event`, `clear_thread_memory`, `download_attachment`, `extract_pdf_file`, `get_current_datetime`, `get_daily_digest`, `check_bin_collection`
+- The agent has access to tools: `check_shared_inbox`, `get_profile`, `remember_this`, `get_calendar`, `add_calendar_event`, `delete_calendar_event`, `update_calendar_event`, `add_email_event`, `sync_email_event_to_gcal`, `list_email_events`, `remove_email_event`, `clear_thread_memory`, `download_attachment`, `extract_pdf_file`, `get_current_datetime`, `get_daily_digest`, `check_bin_collection`
 - Thread memory per user persists across messages
 
 ## Scheduled Jobs (Proactive Behaviour)
