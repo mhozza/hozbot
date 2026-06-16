@@ -107,6 +107,19 @@ def _parse_iso_for_digest(iso_str: str) -> datetime:
     return _parse_iso(iso_str)
 
 
+def _format_local_time(iso_str: str) -> str:
+    """Parse an ISO datetime string and return a human-readable local time.
+
+    Converts to the local timezone (TIMEZONE env var, e.g. Europe/London)
+    so that UTC times are shown with the correct offset (BST in summer).
+    """
+    try:
+        dt = _parse_iso(iso_str)
+        return dt.astimezone(LOCAL_TZ).strftime("%a %d %b, %H:%M")
+    except (ValueError, TypeError) as e:
+        logger.warning("Failed to format local time for %r: %s", iso_str, e)
+        return iso_str
+
 
 
 # Initialize Google provider with API key from environment
@@ -210,10 +223,10 @@ def get_calendar(ctx: RunContext[FamilySystemContext]) -> str:
         lines = ["Upcoming events (next 90 days):"]
         for ev in events:
             title = ev.get("summary", "Untitled")
-            start = ev.get("start", {}).get("dateTime", "?")
+            raw = ev.get("start", {}).get("dateTime", "?")
             event_id = ev.get("id", "?")
             cal = ev.get("_calendar_summary", "primary")
-            lines.append(f"- [{cal}] {title} at {start} (ID: {event_id})")
+            lines.append(f"- [{cal}] {title} at {_format_local_time(raw)} (ID: {event_id})")
         return "\n".join(lines)
     except Exception as e:
         logger.error("Error in get_calendar tool: %s", e, exc_info=True)
@@ -813,7 +826,8 @@ async def generate_digest_text(uid: int | None = None) -> str:
         lines = [f"{label}: ({len(cluster)} event{s})"]
         for ev in cluster:
             cal = ev.get("_calendar_summary", "primary")
-            lines.append(f"- [{cal}] {ev.get('summary', 'Untitled')} at {ev.get('start', {}).get('dateTime', '?')}")
+            raw = ev.get("start", {}).get("dateTime", "?")
+            lines.append(f"- [{cal}] {ev.get('summary', 'Untitled')} at {_format_local_time(raw)}")
         return "\n".join(lines)
 
     event_section = "\n\n".join([
@@ -859,7 +873,7 @@ async def generate_digest_text(uid: int | None = None) -> str:
             new_events_lines = []
             for ev in email_events:
                 badge = "✅" if ev["synced_to_gcal"] else "📋"
-                new_events_lines.append(f"- {badge} {ev['title']} at {ev['start_iso']} (ID: {ev['id']})")
+                new_events_lines.append(f"- {badge} {ev['title']} at {_format_local_time(ev['start_iso'])} (ID: {ev['id']})")
             new_events_str = "\n".join(new_events_lines)
         else:
             new_events_str = "None"
