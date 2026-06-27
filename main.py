@@ -9,7 +9,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 from pydantic_ai import Agent, RunContext, BinaryContent
-from telegram import Update, Message
+from telegram import Update, Message, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram_utils import sanitize_telegram_html
 import agent_email
@@ -54,6 +54,9 @@ PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
 
 LAST_DIGEST_PATH = os.path.join(BASE_DIR, "storage", "last_digest.json")
 SKIPPED_EVENTS_PATH = os.path.join(BASE_DIR, "storage", "skipped_events.json")
+
+# Global Telegram bot reference so agent tools can send files to users
+_telegram_bot: Bot | None = None
 
 
 def read_last_digest_time() -> str | None:
@@ -582,6 +585,39 @@ def extract_pdf_file(ctx: RunContext[FamilySystemContext], file_path: str) -> st
         return f"Error extracting PDF text: {str(e)}"
 
 @agent.tool
+async def send_file_to_chat(ctx: RunContext[FamilySystemContext], file_path: str, caption: str | None = None) -> str:
+    """Send a file (image, PDF, or other document) to the user in the Telegram chat.
+
+    Use this when the user asks to see or receive an attachment from an email.
+    First use download_attachment to save the file, then use this tool to send it to the user.
+
+    Args:
+        file_path: Path to the file to send (as returned by download_attachment).
+        caption: Optional text caption to accompany the file.
+    """
+    if _telegram_bot is None:
+        return "Error: Telegram bot not available."
+    chat_id = ctx.deps.user_id
+    if chat_id == 0:
+        return "Error: Cannot send files in system context."
+    if not os.path.exists(file_path):
+        return f"File not found: {file_path}"
+    try:
+        with open(file_path, "rb") as f:
+            await _telegram_bot.send_document(
+                chat_id=chat_id,
+                document=f,
+                caption=caption,
+                read_timeout=30,
+                write_timeout=30,
+            )
+        return f"Sent: {os.path.basename(file_path)}"
+    except Exception as e:
+        logger.error("Error sending file to chat: %s", e, exc_info=True)
+        return f"Error sending file: {str(e)}"
+
+
+@agent.tool
 async def get_daily_digest(ctx: RunContext[FamilySystemContext]) -> str:
     """Generate the daily briefing with upcoming events, new emails since last digest, and events created from those emails. Does not update the digest watermark."""
     try:
@@ -716,6 +752,7 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         os.makedirs(out_dir, exist_ok=True)
 
         email_summary_lines = []
+        image_contents: list = []
         for idx, email_data in enumerate(emails, 1):
             uid = email_data["uid"]
             summary = (
@@ -749,6 +786,26 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                                 summary += f"\nExtracted text from '{att['filename']}':\n{pdf_text}\n"
                         except Exception as e:
                             logger.error(f"Failed to extract PDF from {att['filename']} in email {uid}: {e}")
+                    elif att['mime_type'].startswith('image/'):
+                        try:
+                            cached = email_store.get_downloaded_path(uid, att['filename'])
+                            if cached:
+                                with open(cached, "rb") as f:
+                                    img_data = f.read()
+                            else:
+                                img_data = fetch_attachment_content_by_uid(uid, att['filename'])
+                                if img_data:
+                                    safe_filename = os.path.basename(att['filename'])
+                                    file_path = os.path.join(out_dir, f"{uid}_{safe_filename}")
+                                    with open(file_path, "wb") as f:
+                                        f.write(img_data)
+                                    eid = email_ids_by_uid.get(uid)
+                                    if eid:
+                                        email_store.update_attachment_local_path(eid, att['filename'], file_path)
+                            if img_data:
+                                image_contents.append(BinaryContent(data=img_data, media_type=att['mime_type']))
+                        except Exception as e:
+                            logger.error(f"Failed to process image {att['filename']} in email {uid}: {e}")
                 att_lines = [f"  - {a['filename']} ({a['mime_type']}, {a['size_bytes']} bytes)" for a in email_data['attachments']]
                 summary += "Attachments:\n" + "\n".join(att_lines) + "\n"
             email_summary_lines.append(summary)
@@ -766,13 +823,17 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         off = now_local.strftime("%z")
         local_offset_iso = f"{off[:3]}:{off[3:]}"
 
-        prompt = EMAIL_CHECK_TEMPLATE.safe_substitute(
+        prompt_text = EMAIL_CHECK_TEMPLATE.safe_substitute(
             email_summary=email_summary,
             local_tz=LOCAL_TZ_NAME,
             local_offset=local_offset_iso,
         )
 
-        reply_text = await run_agent(prompt, deps=system_ctx, uid=None)
+        final_prompt: str | list = [prompt_text] + image_contents
+        if len(final_prompt) == 1:
+            final_prompt = final_prompt[0]
+
+        reply_text = await run_agent(final_prompt, deps=system_ctx, uid=None)
 
         logger.info("Email check agent response:\n%s", reply_text)
 
@@ -998,6 +1059,9 @@ def main() -> None:
 
     logger.info("Initializing Family Office Agent Telegram App...")
     application = Application.builder().token(token).post_stop(shutdown_bye_job).build()
+
+    global _telegram_bot
+    _telegram_bot = application.bot
 
     # Handlers
     application.add_handler(CommandHandler("start", start_cmd))
