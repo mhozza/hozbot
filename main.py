@@ -1,4 +1,5 @@
 import os
+import mimetypes
 import logging
 from dataclasses import dataclass
 from dotenv import load_dotenv
@@ -57,6 +58,7 @@ SKIPPED_EVENTS_PATH = os.path.join(BASE_DIR, "storage", "skipped_events.json")
 
 # Global Telegram bot reference so agent tools can send files to users
 _telegram_bot: Bot | None = None
+_pending_attachment: str | None = None  # set by download_attachment for image follow-up
 
 
 def read_last_digest_time() -> str | None:
@@ -546,9 +548,13 @@ def download_attachment(ctx: RunContext[FamilySystemContext], uid: str, filename
     
     Checks the local cache first to avoid re-downloading from IMAP.
     """
+    global _pending_attachment
     try:
         cached = email_store.get_downloaded_path(uid, filename)
         if cached:
+            mime_type, _ = mimetypes.guess_type(filename)
+            if mime_type and mime_type.startswith('image/'):
+                _pending_attachment = cached
             return f"Already downloaded at {cached} ({os.path.getsize(cached)} bytes)"
 
         data = fetch_attachment_content_by_uid(uid, filename)
@@ -564,6 +570,10 @@ def download_attachment(ctx: RunContext[FamilySystemContext], uid: str, filename
         email_data = email_store.get_email_by_uid(uid)
         if email_data:
             email_store.update_attachment_local_path(email_data["id"], filename, file_path)
+
+        mime_type, _ = mimetypes.guess_type(filename)
+        if mime_type and mime_type.startswith('image/'):
+            _pending_attachment = file_path
 
         return f"Saved to {file_path} ({len(data)} bytes)"
     except Exception as e:
@@ -651,6 +661,9 @@ async def run_agent(prompt, deps, uid: int | None):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global _pending_attachment
+    _pending_attachment = None
+
     # Strict ID whitelist check - drop unauthorized traffic silently
     if not update.effective_user or update.effective_user.id not in ALLOWED_USER_IDS:
         logger.warning(
@@ -710,6 +723,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         reply_text = await run_agent(prompt, deps=sys_ctx, uid=user.id)
+
+        # Follow-up: if the agent downloaded an image, feed it to the model visually
+        if _pending_attachment is not None:
+            file_path = _pending_attachment
+            _pending_attachment = None
+            mime_type, _ = mimetypes.guess_type(file_path)
+            if mime_type and mime_type.startswith('image/'):
+                try:
+                    with open(file_path, "rb") as f:
+                        img_data = f.read()
+                    follow_up: list = [text] if text else ["Analyze this attachment."]
+                    follow_up.append(BinaryContent(data=img_data, media_type=mime_type))
+                    reply_text = await run_agent(follow_up, deps=sys_ctx, uid=user.id)
+                except Exception as e:
+                    logger.error(f"Failed to analyze image attachment: {e}", exc_info=True)
 
         if update.message:
             await safe_reply(update.message, reply_text)
