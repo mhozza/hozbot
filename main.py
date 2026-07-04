@@ -900,10 +900,13 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def generate_digest_text(uid: int | None = None) -> str:
     """Build the digest prompt, run the AI agent, and return the briefing text."""
+    t0 = datetime.now(timezone.utc)
+    logger.info("Digest: generating")
     now = datetime.now(timezone.utc)
     today_str = now.strftime("%A, %Y-%m-%d")
 
     events = gc.list_all_events(now, now + timedelta(days=30))
+    logger.info("Digest: fetched %d calendar events", len(events))
     parsed = []
     for ev in events:
         start_str = ev.get("start", {}).get("dateTime")
@@ -920,6 +923,8 @@ async def generate_digest_text(uid: int | None = None) -> str:
     next_2 = [ev for dt, ev in parsed if dt <= now + timedelta(days=2)]
     next_7 = [ev for dt, ev in parsed if dt <= now + timedelta(days=7)]
     next_30 = [ev for dt, ev in parsed if dt <= now + timedelta(days=30)]
+    logger.info("Digest: %d events in next 2 days, %d in next 7, %d in next 30",
+                len(next_2), len(next_7), len(next_30))
 
     def fmt_cluster(cluster, label):
         if not cluster:
@@ -942,11 +947,13 @@ async def generate_digest_text(uid: int | None = None) -> str:
 
     # Read skipped events (then clear the file)
     skipped_events_str = "None"
+    skipped_count = 0
     if os.path.exists(SKIPPED_EVENTS_PATH):
         try:
             with open(SKIPPED_EVENTS_PATH) as f:
                 skipped = json.load(f)
             if skipped:
+                skipped_count = len(skipped)
                 lines = ["Skipped events (already exist on a shared calendar):"]
                 for se in skipped:
                     lines.append(f"- {se['title']} on {se['date']} ({se['reason']})")
@@ -961,9 +968,12 @@ async def generate_digest_text(uid: int | None = None) -> str:
 
     # Gather new emails and events since last digest (read-only, no watermark update)
     last_digest_time = read_last_digest_time()
+    new_emails_count = 0
+    new_events_count = 0
     if last_digest_time:
         new_emails = email_store.get_emails_since(last_digest_time)
         if new_emails:
+            new_emails_count = len(new_emails)
             new_emails_str = "\n".join(
                 f"- {e['subject']} (from {e['sender']})" for e in new_emails
             )
@@ -972,6 +982,7 @@ async def generate_digest_text(uid: int | None = None) -> str:
 
         email_events = event_store.get_recent_events(last_digest_time)
         if email_events:
+            new_events_count = len(email_events)
             new_events_lines = []
             for ev in email_events:
                 badge = "✅" if ev["synced_to_gcal"] else "📋"
@@ -982,6 +993,8 @@ async def generate_digest_text(uid: int | None = None) -> str:
     else:
         new_emails_str = "None"
         new_events_str = "None"
+    logger.info("Digest: %d new emails, %d new email events, %d skipped events",
+                new_emails_count, new_events_count, skipped_count)
 
     system_ctx = FamilySystemContext(
         user_id=0,
@@ -995,6 +1008,9 @@ async def generate_digest_text(uid: int | None = None) -> str:
     off = now_local.strftime("%z")
     local_offset_iso = f"{off[:3]}:{off[3:]}"
 
+    bin_data = bin_collection.get_tomorrows_collections()
+    logger.info("Digest: bin collections tomorrow: %s", "yes" if bin_data else "no")
+
     prompt = EVENING_DIGEST_TEMPLATE.safe_substitute(
         today_date=today_str,
         profile=json.dumps(profile, indent=2),
@@ -1002,12 +1018,16 @@ async def generate_digest_text(uid: int | None = None) -> str:
         new_emails=new_emails_str,
         new_events_from_emails=new_events_str,
         skipped_events=skipped_events_str,
-        bin_collection=bin_collection.get_tomorrows_collections(),
+        bin_collection=bin_data,
         local_tz=LOCAL_TZ_NAME,
         local_offset=local_offset_iso,
     )
 
-    return await run_agent(prompt, deps=system_ctx, uid=uid)
+    result = await run_agent(prompt, deps=system_ctx, uid=uid)
+
+    elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
+    logger.info("Digest: done in %.1fs, response:\n%s", elapsed, result)
+    return result
 
 
 async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:

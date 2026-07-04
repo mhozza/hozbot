@@ -3,7 +3,7 @@ Generate the evening family briefing for $today_date.
 Local timezone: $local_tz ($local_offset).
 
 Compose a structured summary covering (in order):
-- Any items needing urgent attention (i.e. today & tomorrow, or other reasons). Include bin collection here if $bin_collection is non-empty and bin collection is tomorrow.
+- Any items needing urgent attention (i.e. today & tomorrow, or other reasons). Include bin collection here if any bins are being collected tomorrow.
 - What's happening this week (i.e. until the end of week, or next Monday if today is Friday or later, included)
 - What's happening next week (i.e. from next Monday to next Sunday, included, skip Monday if it was covered by the previous section.)
 - New & updated events from emails received since the last digest — show sync status:

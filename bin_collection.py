@@ -18,6 +18,7 @@ import os
 import json
 import logging
 from datetime import datetime, timezone, timedelta
+import zoneinfo
 from dotenv import load_dotenv
 import requests
 
@@ -206,11 +207,13 @@ def get_tomorrows_collections() -> str:
         return ""
     try:
         services = get_bin_schedule(uprn)
-    except Exception:
+    except Exception as e:
+        logger.error("Failed to fetch bin schedule: %s", e, exc_info=True)
         return ""
 
-    now = datetime.now(timezone.utc)
-    tomorrow_start = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    LOCAL_TZ = zoneinfo.ZoneInfo("Europe/London")
+    now_local = datetime.now(LOCAL_TZ)
+    tomorrow = now_local.date() + timedelta(days=1)
 
     tomorrow_bins: list[str] = []
     for svc in services:
@@ -218,9 +221,8 @@ def get_tomorrows_collections() -> str:
             try:
                 next_dt = datetime.fromisoformat(h["Next"])
                 if next_dt.tzinfo is None:
-                    next_dt = next_dt.replace(tzinfo=timezone.utc)
-                next_date = next_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-                if next_date == tomorrow_start:
+                    next_dt = next_dt.replace(tzinfo=LOCAL_TZ)
+                if next_dt.date() == tomorrow:
                     tomorrow_bins.append(_friendly_name(h.get("TaskType", "?")))
             except (ValueError, KeyError):
                 continue
