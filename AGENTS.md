@@ -3,8 +3,8 @@
 ## Tech Stack
 - **Language**: Python 3.13+
 - **AI Framework**: `pydantic-ai-slim` (v1.102.0) with Google Gemini models
-  - Primary: `gemini-3.5-flash`
-  - Fallback: `gemini-3.1-flash-lite`
+  - Primary: `gemini-3.8-flash`
+  - Fallback: `gemini-3.7-flash`, `gemini-3.5-flash-lite`
 - **Telegram**: `python-telegram-bot` v21.10
 - **Email**: `imapclient` v3.0.1 (IMAP + SSL)
 - **PDF**: `pypdf` v5.1.0

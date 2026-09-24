@@ -130,10 +130,11 @@ def _format_local_time(iso_str: str) -> str:
 # Initialize Google provider with API key from environment
 google_provider = GoogleProvider(api_key=os.getenv("GOOGLE_API_KEY"))
 # Initialize GoogleModel instances for primary and fallback
-primary_model = GoogleModel('gemini-3.5-flash', provider=google_provider)
-fallback_model = GoogleModel('gemini-3.1-flash-lite', provider=google_provider)
-# Use FallbackModel to try primary first, then fallback
-model = FallbackModel(primary_model, fallback_model)
+primary_model = GoogleModel('gemini-3.8-flash', provider=google_provider)
+middle_model = GoogleModel('gemini-3.7-flash', provider=google_provider)
+fallback_model = GoogleModel('gemini-3.5-flash-lite', provider=google_provider)
+# Use FallbackModel to try primary first, then fallbacks
+model = FallbackModel(primary_model, middle_model, fallback_model)
 
 # Load prompt templates
 SYSTEM_PROMPT = open(os.path.join(PROMPTS_DIR, "system_prompt.md")).read().strip()
