@@ -10,6 +10,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 from pydantic_ai import Agent, RunContext, BinaryContent
+from pydantic_ai.exceptions import ModelHTTPError
 from telegram import Update, Message, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram_utils import sanitize_telegram_html
@@ -55,6 +56,13 @@ PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
 
 LAST_DIGEST_PATH = os.path.join(BASE_DIR, "storage", "last_digest.json")
 SKIPPED_EVENTS_PATH = os.path.join(BASE_DIR, "storage", "skipped_events.json")
+
+# Digest retry behaviour: when the model provider returns one of these status codes
+# (e.g. 503 Service Unavailable), the digest job is retried on a chained job queue.
+DIGEST_RETRY_STATUS_CODES = {503}
+DIGEST_RETRY_INTERVAL_MINUTES = 10
+DIGEST_MAX_ATTEMPTS = 6
+DIGEST_RETRY_ATTEMPT = 1
 
 # Global Telegram bot reference so agent tools can send files to users
 _telegram_bot: Bot | None = None
@@ -1032,10 +1040,30 @@ async def generate_digest_text(uid: int | None = None) -> str:
 
 
 async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("Evening digest: starting")
+    global DIGEST_RETRY_ATTEMPT
+    attempt = DIGEST_RETRY_ATTEMPT
+    logger.info("Evening digest: starting (attempt %d/%d)", attempt, DIGEST_MAX_ATTEMPTS)
     try:
         digest_text = await generate_digest_text(uid=None)
-
+    except ModelHTTPError as e:
+        if e.status_code in DIGEST_RETRY_STATUS_CODES and attempt < DIGEST_MAX_ATTEMPTS:
+            DIGEST_RETRY_ATTEMPT = attempt + 1
+            context.job_queue.run_once(
+                evening_digest_job,
+                when=DIGEST_RETRY_INTERVAL_MINUTES * 60,
+                job_kwargs={"misfire_grace_time": 86400},
+            )
+            logger.error(
+                "Evening digest failed with model HTTP %s; retrying in %d minutes (attempt %d/%d)",
+                e.status_code, DIGEST_RETRY_INTERVAL_MINUTES, attempt + 1, DIGEST_MAX_ATTEMPTS,
+            )
+        else:
+            DIGEST_RETRY_ATTEMPT = 1
+            logger.error("Evening digest failed: %s", e, exc_info=True)
+    except Exception as e:
+        DIGEST_RETRY_ATTEMPT = 1
+        logger.error(f"Evening digest failed: {e}", exc_info=True)
+    else:
         for uid in ALLOWED_USER_IDS:
             try:
                 await safe_send(context.bot, uid, digest_text)
@@ -1043,9 +1071,8 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.error(f"Failed to send digest to user {uid}: {e}")
 
         save_last_digest_time(datetime.now(timezone.utc).isoformat())
+        DIGEST_RETRY_ATTEMPT = 1
         logger.info("Evening digest: sent successfully")
-    except Exception as e:
-        logger.error(f"Evening digest failed: {e}", exc_info=True)
 
 
 async def startup_hello_job(context: ContextTypes.DEFAULT_TYPE) -> None:
