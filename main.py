@@ -1,6 +1,7 @@
 import os
 import mimetypes
 import logging
+import httpx
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from string import Template
@@ -57,11 +58,10 @@ PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
 LAST_DIGEST_PATH = os.path.join(BASE_DIR, "storage", "last_digest.json")
 SKIPPED_EVENTS_PATH = os.path.join(BASE_DIR, "storage", "skipped_events.json")
 
-# Digest retry behaviour: when the model provider returns one of these status codes
-# (e.g. 503 Service Unavailable), the digest job is retried on a chained job queue.
-DIGEST_RETRY_STATUS_CODES = {503}
-DIGEST_RETRY_INTERVAL_MINUTES = 10
-DIGEST_MAX_ATTEMPTS = 6
+# Retry behaviour for transient model/provider errors (e.g. 503 Service Unavailable)
+RETRY_STATUS_CODES = {503, 429, 500, 502, 504}
+RETRY_INTERVAL_MINUTES = 10
+MAX_ATTEMPTS = 6
 DIGEST_RETRY_ATTEMPT = 1
 
 # Global Telegram bot reference so agent tools can send files to users
@@ -1042,27 +1042,40 @@ async def generate_digest_text(uid: int | None = None) -> str:
 async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     global DIGEST_RETRY_ATTEMPT
     attempt = DIGEST_RETRY_ATTEMPT
-    logger.info("Evening digest: starting (attempt %d/%d)", attempt, DIGEST_MAX_ATTEMPTS)
+    logger.info("Evening digest: starting (attempt %d/%d)", attempt, MAX_ATTEMPTS)
     try:
         digest_text = await generate_digest_text(uid=None)
-    except ModelHTTPError as e:
-        if e.status_code in DIGEST_RETRY_STATUS_CODES and attempt < DIGEST_MAX_ATTEMPTS:
+    except (ModelHTTPError, httpx.ReadTimeout, httpx.TimeoutException) as e:
+        status_code = getattr(e, "status_code", None)
+        if (status_code in RETRY_STATUS_CODES or isinstance(e, (httpx.ReadTimeout, httpx.TimeoutException))) and attempt < MAX_ATTEMPTS:
             DIGEST_RETRY_ATTEMPT = attempt + 1
             context.job_queue.run_once(
                 evening_digest_job,
-                when=DIGEST_RETRY_INTERVAL_MINUTES * 60,
+                when=RETRY_INTERVAL_MINUTES * 60,
                 job_kwargs={"misfire_grace_time": 86400},
             )
             logger.error(
-                "Evening digest failed with model HTTP %s; retrying in %d minutes (attempt %d/%d)",
-                e.status_code, DIGEST_RETRY_INTERVAL_MINUTES, attempt + 1, DIGEST_MAX_ATTEMPTS,
+                "Evening digest failed with transient error %s; retrying in %d minutes (attempt %d/%d)",
+                type(e).__name__, RETRY_INTERVAL_MINUTES, attempt + 1, MAX_ATTEMPTS,
             )
         else:
             DIGEST_RETRY_ATTEMPT = 1
             logger.error("Evening digest failed: %s", e, exc_info=True)
     except Exception as e:
-        DIGEST_RETRY_ATTEMPT = 1
-        logger.error(f"Evening digest failed: {e}", exc_info=True)
+        if attempt < MAX_ATTEMPTS and ("timeout" in str(e).lower() or "timed out" in str(e).lower() or "503" in str(e)):
+            DIGEST_RETRY_ATTEMPT = attempt + 1
+            context.job_queue.run_once(
+                evening_digest_job,
+                when=RETRY_INTERVAL_MINUTES * 60,
+                job_kwargs={"misfire_grace_time": 86400},
+            )
+            logger.error(
+                "Evening digest failed with transient error; retrying in %d minutes (attempt %d/%d): %s",
+                RETRY_INTERVAL_MINUTES, attempt + 1, MAX_ATTEMPTS, e,
+            )
+        else:
+            DIGEST_RETRY_ATTEMPT = 1
+            logger.error(f"Evening digest failed: {e}", exc_info=True)
     else:
         for uid in ALLOWED_USER_IDS:
             try:
