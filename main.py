@@ -13,13 +13,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 from pydantic_ai import Agent, RunContext, BinaryContent
 from pydantic_ai.exceptions import ModelHTTPError
 from telegram import Update, Message, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, Defaults
 from telegram_utils import sanitize_telegram_html
 import agent_email
 import email_store
 from pydantic_ai.capabilities import Thinking
 import asyncio
 from datetime import date, datetime, time, timezone, timedelta
+from zoneinfo import ZoneInfo
 from database import read_profile, append_fact
 import json
 from typing import List
@@ -1045,6 +1046,45 @@ async def generate_digest_text(uid: int | None = None) -> str:
     return result
 
 
+def get_digest_schedule_config(now: datetime | None = None) -> tuple[time, ZoneInfo, str, bool]:
+    """Return the configured digest time (with tzinfo), timezone, timezone name, and catch-up flag.
+
+    The evening digest is scheduled in the local UK timezone (configurable via TIMEZONE or
+    DIGEST_TIMEZONE, defaulting to 'Europe/London') so that the scheduled wall-clock time
+    remains consistent across daylight saving time transitions (GMT/BST).
+    """
+    digest_time_str = os.getenv("DIGEST_TIME", "19:00")
+    digest_tz_name = os.getenv("DIGEST_TIMEZONE", LOCAL_TZ_NAME)
+    try:
+        digest_tz = ZoneInfo(digest_tz_name)
+    except Exception as e:
+        logger.warning(
+            "Invalid DIGEST_TIMEZONE %r, falling back to %s: %s",
+            digest_tz_name,
+            LOCAL_TZ_NAME,
+            e,
+        )
+        digest_tz = LOCAL_TZ
+        digest_tz_name = LOCAL_TZ_NAME
+
+    hour, minute = map(int, digest_time_str.split(":"))
+    digest_time = time(hour, minute, 0, tzinfo=digest_tz)
+
+    send_on_start = os.getenv("SEND_DIGEST_ON_START", str(SEND_DIGEST_ON_START)).lower() == "true"
+    should_catch_up = False
+    if send_on_start:
+        if now is None:
+            now_dt = datetime.now(digest_tz)
+        elif now.tzinfo is None:
+            now_dt = now.replace(tzinfo=digest_tz)
+        else:
+            now_dt = now.astimezone(digest_tz)
+        digest_datetime = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        should_catch_up = (now_dt >= digest_datetime)
+
+    return digest_time, digest_tz, digest_tz_name, should_catch_up
+
+
 async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     global DIGEST_RETRY_ATTEMPT
     attempt = DIGEST_RETRY_ATTEMPT
@@ -1153,7 +1193,13 @@ def main() -> None:
         logger.error(f"Failed to initialize Google Calendar: {e}")
 
     logger.info("Initializing Family Office Agent Telegram App...")
-    application = Application.builder().token(token).post_stop(shutdown_bye_job).build()
+    application = (
+        Application.builder()
+        .token(token)
+        .defaults(Defaults(tzinfo=LOCAL_TZ))
+        .post_stop(shutdown_bye_job)
+        .build()
+    )
 
     global _telegram_bot
     _telegram_bot = application.bot
@@ -1169,19 +1215,19 @@ def main() -> None:
         logger.info(f"Scheduled email check every {interval} minutes")
 
     if os.getenv("DIGEST_ENABLED", "true").lower() == "true":
+        digest_time, digest_tz, digest_tz_name, should_catch_up = get_digest_schedule_config()
         digest_time_str = os.getenv("DIGEST_TIME", "19:00")
-        hour, minute = map(int, digest_time_str.split(":"))
-        digest_time = time(hour, minute, 0)
-        application.job_queue.run_daily(evening_digest_job, time=digest_time, job_kwargs={"misfire_grace_time": 86400})
-        logger.info(f"Scheduled evening digest at {digest_time_str}")
+        application.job_queue.run_daily(
+            evening_digest_job, time=digest_time, job_kwargs={"misfire_grace_time": 86400}
+        )
+        logger.info(f"Scheduled evening digest at {digest_time_str} {digest_tz_name}")
 
         # Catch up if digest time already passed today (e.g. restart / sleep after digest time)
-        if SEND_DIGEST_ON_START:
-            now = datetime.now()
-            digest_datetime = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if now >= digest_datetime:
-                application.job_queue.run_once(evening_digest_job, when=5, job_kwargs={"misfire_grace_time": 86400})
-                logger.info("Scheduling catch-up evening digest (missed today)")
+        if should_catch_up:
+            application.job_queue.run_once(
+                evening_digest_job, when=5, job_kwargs={"misfire_grace_time": 86400}
+            )
+            logger.info("Scheduling catch-up evening digest (missed today in %s)", digest_tz_name)
 
     # Send startup hello
     application.job_queue.run_once(startup_hello_job, when=5)

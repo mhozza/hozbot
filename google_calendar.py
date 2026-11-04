@@ -17,8 +17,16 @@ logger = logging.getLogger(__name__)
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 DEFAULT_EVENT_DURATION_MINUTES = 60
 
-LOCAL_TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/London"))
-LOCAL_TZ_NAME = os.getenv("TIMEZONE", "Europe/London")
+def _resolve_local_tz() -> tuple[ZoneInfo, str]:
+    tz_name = os.getenv("TIMEZONE", "Europe/London")
+    try:
+        return ZoneInfo(tz_name), tz_name
+    except Exception as e:
+        logger.warning("Invalid TIMEZONE %r, falling back to Europe/London: %s", tz_name, e)
+        return ZoneInfo("Europe/London"), "Europe/London"
+
+
+LOCAL_TZ, LOCAL_TZ_NAME = _resolve_local_tz()
 
 
 def _event_start_raw(e: dict[str, Any]) -> str:

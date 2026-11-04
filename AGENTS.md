@@ -40,11 +40,12 @@ The Dockerfile uses a multi-stage build with `ghcr.io/astral-sh/uv:python3.13-al
 | `EMAIL_APP_PASSWORD` | Email app password |
 | `EMAIL_CHECK_INTERVAL_MINUTES` | How often to poll the inbox (default: 15) |
 | `EMAIL_CHECK_ENABLED` | Enable/disable periodic email checks (default: true) |
-| `DIGEST_TIME` | Time for evening digest (default: 19:00) |
+| `DIGEST_TIME` | Time for evening digest in local timezone (default: 19:00) |
+| `DIGEST_TIMEZONE` | Optional timezone override for evening digest (default: `TIMEZONE`) |
 | `DIGEST_ENABLED` | Enable/disable evening digest (default: true) |
 | `SEND_DIGEST_ON_START` | Send catch-up digest on startup if digest time already passed (default: false) |
 | `SEND_HI_BYE` | Comma-separated Telegram user IDs for startup/shutdown notifications (default: empty, disabled) |
-| `TIMEZONE` | IANA timezone for the bot (default: `Europe/London`) |
+| `TIMEZONE` | IANA timezone for the bot and digest (default: `Europe/London`) |
 | `BIN_UPRN` | UPRN for bin collection lookups (see tools/get_uprn.py) |
 
 ## Project Structure
