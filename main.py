@@ -19,7 +19,7 @@ import agent_email
 import email_store
 from pydantic_ai.capabilities import Thinking
 import asyncio
-from datetime import datetime, time, timezone, timedelta
+from datetime import date, datetime, time, timezone, timedelta
 from database import read_profile, append_fact
 import json
 from typing import List
@@ -106,7 +106,7 @@ from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
 from pydantic_ai.models.fallback import FallbackModel
-from google_calendar import GoogleCalendar, migrate_from_json, _parse_iso, LOCAL_TZ, LOCAL_TZ_NAME
+from google_calendar import GoogleCalendar, migrate_from_json, _parse_iso, LOCAL_TZ, LOCAL_TZ_NAME, _event_start_raw
 import database as db_mod
 import event_store
 
@@ -125,8 +125,14 @@ def _format_local_time(iso_str: str) -> str:
 
     Converts to the local timezone (TIMEZONE env var, e.g. Europe/London)
     so that UTC times are shown with the correct offset (BST in summer).
+    For date-only strings (e.g. all-day events), returns the date without time.
     """
+    if not iso_str or iso_str == "?":
+        return iso_str
     try:
+        if "T" not in iso_str and " " not in iso_str:
+            d = date.fromisoformat(iso_str)
+            return d.strftime("%a %d %b")
         dt = _parse_iso(iso_str)
         return dt.astimezone(LOCAL_TZ).strftime("%a %d %b, %H:%M")
     except (ValueError, TypeError) as e:
@@ -250,7 +256,7 @@ def get_calendar(ctx: RunContext[FamilySystemContext]) -> str:
         lines = ["Upcoming events (next 90 days):"]
         for ev in events:
             title = ev.get("summary", "Untitled")
-            raw = ev.get("start", {}).get("dateTime", "?")
+            raw = _event_start_raw(ev) or "?"
             event_id = ev.get("id", "?")
             cal = ev.get("_calendar_summary", "primary")
             lines.append(f"- [{cal}] {title} at {_format_local_time(raw)} (ID: {event_id})")
@@ -402,7 +408,7 @@ def list_email_events(ctx: RunContext[FamilySystemContext], date: str | None = N
             now = datetime.now(timezone.utc)
             gcal_events = gc.list_all_events(now, now + timedelta(days=90))
             if date:
-                gcal_events = [ev for ev in gcal_events if ev.get("start", {}).get("dateTime", "").startswith(date)]
+                gcal_events = [ev for ev in gcal_events if _event_start_raw(ev).startswith(date)]
             if title:
                 title_lower = title.lower()
                 gcal_events = [ev for ev in gcal_events if title_lower in ev.get("summary", "").lower()]
@@ -410,7 +416,7 @@ def list_email_events(ctx: RunContext[FamilySystemContext], date: str | None = N
                 lines.append("\nMatching events on shared calendars:")
                 for ev in gcal_events:
                     title_s = ev.get("summary", "Untitled")
-                    start_s = ev.get("start", {}).get("dateTime", "?")
+                    start_s = _event_start_raw(ev) or "?"
                     cal = ev.get("_calendar_summary", "?")
                     lines.append(f"- [{cal}] {title_s} at {start_s}")
 
@@ -918,12 +924,12 @@ async def generate_digest_text(uid: int | None = None) -> str:
     logger.info("Digest: fetched %d calendar events", len(events))
     parsed = []
     for ev in events:
-        start_str = ev.get("start", {}).get("dateTime")
+        start_str = _event_start_raw(ev)
         if not start_str:
             continue
         try:
             dt = _parse_iso_for_digest(start_str)
-            if dt >= now:
+            if dt >= now or ("T" not in start_str and " " not in start_str and dt.date() >= now.astimezone(LOCAL_TZ).date()):
                 parsed.append((dt, ev))
         except (ValueError, TypeError):
             continue
@@ -942,7 +948,7 @@ async def generate_digest_text(uid: int | None = None) -> str:
         lines = [f"{label}: ({len(cluster)} event{s})"]
         for ev in cluster:
             cal = ev.get("_calendar_summary", "primary")
-            raw = ev.get("start", {}).get("dateTime", "?")
+            raw = _event_start_raw(ev) or "?"
             lines.append(f"- [{cal}] {ev.get('summary', 'Untitled')} at {_format_local_time(raw)}")
         return "\n".join(lines)
 

@@ -21,6 +21,12 @@ LOCAL_TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/London"))
 LOCAL_TZ_NAME = os.getenv("TIMEZONE", "Europe/London")
 
 
+def _event_start_raw(e: dict[str, Any]) -> str:
+    """Return the start datetime or date string of an event."""
+    start = e.get("start") or {}
+    return start.get("dateTime") or start.get("date") or ""
+
+
 class GoogleCalendar:
     def __init__(self, credentials_path: str, token_path: str, calendar_id: str = "primary"):
         self.credentials_path = credentials_path
@@ -210,7 +216,7 @@ class GoogleCalendar:
             except HttpError:
                 continue
 
-        all_events.sort(key=lambda e: e.get("start", {}).get("dateTime", ""))
+        all_events.sort(key=_event_start_raw)
         return all_events
 
     def create_event(
