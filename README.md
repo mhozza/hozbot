@@ -21,4 +21,4 @@ The bot uses Google Calendar as its event store. Before first use, set it up:
 # Run the auth tool:
 uv run tools/auth_google_calendar.py --email bot@gmail.com
 
-This prints a URL. Open it in a **private/incognito** browser window, sign in as the bot account, authorize, and paste the code back. The token is saved to `storage/google_calendar_token.json` and refreshes automatically thereafter.
+This starts a local redirect server and prints an authorization URL. Open it in a **private/incognito** browser window, sign in as the bot account, and authorize the application. The token is saved to `storage/google_calendar_token.json` and refreshes automatically thereafter.

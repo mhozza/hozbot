@@ -14,7 +14,10 @@ from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
+]
 DEFAULT_EVENT_DURATION_MINUTES = 60
 
 def _resolve_local_tz() -> tuple[ZoneInfo, str]:
@@ -88,17 +91,37 @@ class GoogleCalendar:
                     return False
             else:
                 return False
+        else:
+            try:
+                os.chmod(self.token_path, 0o600)
+            except OSError:
+                pass
 
         self.service = build("calendar", "v3", credentials=creds)
         return True
 
-    def auth_console(self, login_hint: str | None = None) -> None:
-        """Run the interactive OAuth console flow to obtain a token.
+    def auth_console(
+        self,
+        login_hint: str | None = None,
+        port: int = 0,
+        open_browser: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        """Run the interactive OAuth local server flow to obtain a token.
 
         Args:
             login_hint: Optional email to pre-fill in the Google OAuth page.
                         Useful when signed into multiple accounts.
+            port: Port for local redirect server (default: 0 for dynamic ephemeral port).
+            open_browser: Whether to automatically launch the default browser.
+                          Default: False (prints URL to visit, ideal for headless/SSH).
+            **kwargs: Extra parameters passed to flow.run_local_server / authorization_url.
         """
+        # Google OAuth returns previously granted scopes (e.g. from existing authorizations)
+        # when include_granted_scopes="true" or when consent was previously given.
+        # Allow oauthlib to accept superset/extended granted scopes without throwing ScopeChanged.
+        os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
         if not os.path.exists(self.credentials_path):
             raise FileNotFoundError(
                 f"Google Calendar credentials file not found: {self.credentials_path}. "
@@ -120,55 +143,46 @@ class GoogleCalendar:
             print(f"WARNING: could not validate credentials file: {e}")
 
         flow = InstalledAppFlow.from_client_secrets_file(self.credentials_path, SCOPES)
-        flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
 
-        auth_kwargs = dict(access_type="offline", include_granted_scopes="true")
+        auth_kwargs: dict[str, Any] = dict(access_type="offline", include_granted_scopes="true")
         if login_hint:
             auth_kwargs["login_hint"] = login_hint
+        auth_kwargs.update(kwargs)
 
-        url = flow.authorization_url(**auth_kwargs)[0]
         account_hint = f" for {login_hint}" if login_hint else ""
-        print(
+        prompt_message = (
             "\n" + "=" * 60 + "\n"
-            "Google Calendar OAuth — authorize the bot account" + account_hint + "\n"
+            f"Google Calendar OAuth — authorize the bot account{account_hint}\n"
             "\n"
-            "1. COPY the URL below\n"
-            "2. Open your browser in PRIVATE / INCOGNITO mode\n"
-            "3. Paste the URL and sign in as the bot's Google account\n"
-            "\n"
-            f"{url}\n"
+            "Please visit this URL to authorize this application:\n"
+            "{url}\n"
             + "=" * 60 + "\n"
-            "Paste the full authorization code here:\n> ",
-            flush=True,
         )
 
-        code = sys.stdin.readline().strip()
-        if not code:
-            print("No code entered. Aborting.")
-            return
-
         try:
-            flow.fetch_token(code=code)
+            creds = flow.run_local_server(
+                port=port,
+                open_browser=open_browser,
+                authorization_prompt_message=prompt_message,
+                **auth_kwargs,
+            )
         except Exception as e:
+            logger.error("Failed to complete Google Calendar OAuth flow: %s", e)
             print(
-                f"\nFailed to exchange authorization code: {e}\n\n"
+                f"\nFailed to authenticate with Google: {e}\n\n"
                 "Common causes:\n"
                 "  1. Your email isn't added as a test user.\n"
                 "     Go to: Google Cloud Console → OAuth consent screen → "
                 "Audience → Add your email as a test user.\n"
-                "  2. The 'calendar' scope isn't added.\n"
+                "  2. The required scopes ('.../auth/calendar.readonly', '.../auth/calendar.events') aren't added.\n"
                 "     Go to: Google Cloud Console → OAuth consent screen → "
-                "Scopes → Add '.../auth/calendar'.\n"
+                "Scopes → Add them.\n"
                 "  3. The credentials file is the wrong type.\n"
                 "     Must be 'Desktop app' (look for 'installed' key in the JSON), "
                 "not 'Web application'.\n"
-                "  4. The authorization code expired (codes expire in ~5 minutes). "
-                "Run the tool again.\n"
-                "  5. Wrong Google account — use --email flag to specify which account.\n"
+                "  4. Wrong Google account — use --email flag to specify which account.\n"
             )
             raise
-
-        creds = flow.credentials
 
         self._save_token(creds)
         logger.info("Google Calendar OAuth token saved to %s", self.token_path)
@@ -391,4 +405,10 @@ def migrate_from_json(json_path: str, gc: GoogleCalendar) -> int:
         logger.info("Migrated %d events to Google Calendar; backup at %s", migrated, backup)
 
     return migrated
+
+
+if __name__ == "__main__":
+    from tools.auth_google_calendar import main
+
+    main()
 

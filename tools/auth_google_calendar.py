@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """One-time Google Calendar OAuth setup.
 
-Runs the interactive OAuth flow, saves the token, and optionally
+Runs the interactive OAuth local server flow, saves the token, and optionally
 migrates existing calendar_db.json events to Google Calendar.
 
 Usage:
     uv run tools/auth_google_calendar.py
     uv run tools/auth_google_calendar.py --email bot@example.com
+    uv run tools/auth_google_calendar.py --port 8080 --open-browser
 """
 
 import os
@@ -24,14 +25,7 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 
-parser = argparse.ArgumentParser(description="Google Calendar OAuth setup")
-parser.add_argument("--email", help="Email to pre-fill in the OAuth page (for multiple-account setups)")
-args = parser.parse_args()
-
-# Resolve paths the same way main.py does
 base = os.path.dirname(os.path.abspath(__file__))
-cred = os.getenv("GOOGLE_CALENDAR_CREDENTIALS_FILE", "storage/credentials.json")
-tok = os.getenv("GOOGLE_CALENDAR_TOKEN_FILE", "storage/google_calendar_token.json")
 
 
 def resolve(p: str) -> str:
@@ -40,22 +34,55 @@ def resolve(p: str) -> str:
     return os.path.normpath(p)
 
 
-creds_path = resolve(cred)
-token_path = resolve(tok)
+def authenticate(
+    credentials_path: str,
+    token_path: str,
+    login_hint: str | None = None,
+    port: int = 0,
+    open_browser: bool = False,
+):
+    from google_calendar import GoogleCalendar
 
-from google_calendar import GoogleCalendar, migrate_from_json
+    gc = GoogleCalendar(credentials_path, token_path)
+    gc.auth_console(login_hint=login_hint, port=port, open_browser=open_browser)
+    return gc
 
-gc = GoogleCalendar(creds_path, token_path)
-gc.auth_console(login_hint=args.email)
-print(f"✓ Authenticated! Token saved to {token_path}")
 
-# Check for old JSON calendar to migrate
-import database
-if os.path.exists(database.CALENDAR_PATH):
-    count = migrate_from_json(database.CALENDAR_PATH, gc)
-    if count > 0:
-        print(f"✓ Migrated {count} existing events to Google Calendar")
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Google Calendar OAuth setup")
+    parser.add_argument("--email", help="Email to pre-fill in the OAuth page (for multiple-account setups)")
+    parser.add_argument("--port", type=int, default=0, help="Port to run local redirect server on (default: 0 for dynamic free port)")
+    parser.add_argument("--open-browser", action="store_true", default=False, help="Open browser automatically (default: False)")
+    args = parser.parse_args(argv)
+
+    cred = os.getenv("GOOGLE_CALENDAR_CREDENTIALS_FILE", "storage/credentials.json")
+    tok = os.getenv("GOOGLE_CALENDAR_TOKEN_FILE", "storage/google_calendar_token.json")
+
+    creds_path = resolve(cred)
+    token_path = resolve(tok)
+
+    from google_calendar import migrate_from_json
+
+    gc = authenticate(
+        creds_path,
+        token_path,
+        login_hint=args.email,
+        port=args.port,
+        open_browser=args.open_browser,
+    )
+    print(f"✓ Authenticated! Token saved to {token_path}")
+
+    # Check for old JSON calendar to migrate
+    import database
+    if os.path.exists(database.CALENDAR_PATH):
+        count = migrate_from_json(database.CALENDAR_PATH, gc)
+        if count > 0:
+            print(f"✓ Migrated {count} existing events to Google Calendar")
+        else:
+            print("No events to migrate.")
     else:
-        print("No events to migrate.")
-else:
-    print("No existing calendar_db.json found — nothing to migrate.")
+        print("No existing calendar_db.json found — nothing to migrate.")
+
+
+if __name__ == "__main__":
+    main()

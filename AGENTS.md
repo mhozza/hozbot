@@ -112,7 +112,7 @@ uv run tools/auth_google_calendar.py
 # If signed into multiple Google accounts, specify which one:
 uv run tools/auth_google_calendar.py --email hozbot@gmail.com
 ```
-Opens a URL in your browser; authorize and paste the code back.
+Starts a local redirect server and prints an authorization URL; authorize in your browser.
 
 ## CLI (tools/get_uprn.py)
 Resolve a postcode or address to a UPRN (for the `BIN_UPRN` env var):

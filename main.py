@@ -1616,7 +1616,7 @@ def main() -> None:
         if not auth_ok:
             logger.warning(
                 "Google Calendar not authenticated. Calendar features will be unavailable. "
-                "Run `uv run google_calendar.py` to set up OAuth."
+                "Run `uv run tools/auth_google_calendar.py` to set up OAuth."
             )
         elif os.path.exists(db_mod.CALENDAR_PATH):
             count = migrate_from_json(db_mod.CALENDAR_PATH, gc)
