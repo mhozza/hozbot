@@ -42,6 +42,34 @@ class GoogleCalendar:
         self.calendar_id = calendar_id
         self.service = None
 
+    def _save_token(self, creds: Credentials) -> None:
+        token_dir = os.path.dirname(self.token_path) or "."
+        os.makedirs(token_dir, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(token_dir, 0o700)
+        except OSError:
+            pass
+
+        tmp = self.token_path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            with open(fd, "w", encoding="utf-8") as f:
+                f.write(creds.to_json())
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        os.rename(tmp, self.token_path)
+        try:
+            os.chmod(self.token_path, 0o600)
+        except OSError:
+            pass
+
     def try_load_token(self) -> bool:
         """Try to load and refresh an existing token. Returns True if successful."""
         if not os.path.exists(self.token_path):
@@ -55,6 +83,7 @@ class GoogleCalendar:
             if creds and creds.expired and creds.refresh_token:
                 try:
                     creds.refresh(Request())
+                    self._save_token(creds)
                 except Exception:
                     return False
             else:
@@ -141,9 +170,7 @@ class GoogleCalendar:
 
         creds = flow.credentials
 
-        os.makedirs(os.path.dirname(self.token_path) or ".", exist_ok=True)
-        with open(self.token_path, "w") as f:
-            f.write(creds.to_json())
+        self._save_token(creds)
         logger.info("Google Calendar OAuth token saved to %s", self.token_path)
         self.service = build("calendar", "v3", credentials=creds)
 
@@ -357,6 +384,10 @@ def migrate_from_json(json_path: str, gc: GoogleCalendar) -> int:
     if migrated > 0:
         backup = json_path + ".migrated"
         os.rename(json_path, backup)
+        try:
+            os.chmod(backup, 0o600)
+        except OSError:
+            pass
         logger.info("Migrated %d events to Google Calendar; backup at %s", migrated, backup)
 
     return migrated

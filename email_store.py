@@ -10,7 +10,32 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DB_PATH = os.path.join(BASE_DIR, "storage", "hozbot.db")
 
 
+def _ensure_db_permissions(db_path: str) -> None:
+    if not db_path or db_path == ":memory:" or db_path.startswith("file:"):
+        return
+    storage_dir = os.path.dirname(db_path)
+    if storage_dir:
+        os.makedirs(storage_dir, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(storage_dir, 0o700)
+        except OSError:
+            pass
+
+    if not os.path.exists(db_path):
+        fd = os.open(db_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+    else:
+        try:
+            os.chmod(db_path, 0o600)
+        except OSError:
+            pass
+
+
 def _get_connection() -> sqlite3.Connection:
+    _ensure_db_permissions(DB_PATH)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -20,7 +45,7 @@ def _get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    _ensure_db_permissions(DB_PATH)
     with _get_connection() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS emails (
@@ -71,6 +96,14 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_email_events_google_event_id
                 ON email_events(google_event_id);
         """)
+    if DB_PATH and DB_PATH != ":memory:":
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            p = DB_PATH + suffix
+            if os.path.exists(p):
+                try:
+                    os.chmod(p, 0o600)
+                except OSError:
+                    pass
     logger.info("Database initialised at %s", DB_PATH)
 
 

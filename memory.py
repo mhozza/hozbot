@@ -5,8 +5,11 @@ from typing import List, Dict
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")
-if not os.path.isdir(STORAGE_DIR):
-    os.makedirs(STORAGE_DIR, exist_ok=True)
+os.makedirs(STORAGE_DIR, mode=0o700, exist_ok=True)
+try:
+    os.chmod(STORAGE_DIR, 0o700)
+except OSError:
+    pass
 MEMORY_FILE = os.path.join(STORAGE_DIR, "thread_memory.json")
 
 MEMORY_WINDOW_MINUTES = 60
@@ -36,8 +39,32 @@ def _load_memory() -> Dict[str, list]:
 
 
 def _save_memory(data: Dict[str, list]) -> None:
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    dir_path = os.path.dirname(MEMORY_FILE)
+    if dir_path:
+        os.makedirs(dir_path, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(dir_path, 0o700)
+        except OSError:
+            pass
+    tmp = MEMORY_FILE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.rename(tmp, MEMORY_FILE)
+    try:
+        os.chmod(MEMORY_FILE, 0o600)
+    except OSError:
+        pass
 
 
 def get_memory(user_id: int) -> List[str]:

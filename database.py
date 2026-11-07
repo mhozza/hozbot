@@ -8,6 +8,16 @@ PROFILE_PATH = os.path.join(BASE_DIR, "storage", "family_profile.json")
 CALENDAR_PATH = os.path.join(BASE_DIR, "storage", "calendar_db.json")
 
 
+def _ensure_dir(path: str) -> None:
+    dir_path = os.path.dirname(path)
+    if dir_path:
+        os.makedirs(dir_path, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(dir_path, 0o700)
+        except OSError:
+            pass
+
+
 def _default_for(path: str) -> Any:
     """Return a sensible default for a known storage path."""
     return [] if path.endswith("_db.json") else {}
@@ -19,7 +29,7 @@ def _read_json(path: str) -> Any:
     Returns the default value for missing, empty, or corrupt files.
     """
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             fcntl.flock(f, fcntl.LOCK_SH)
             raw = f.read().strip()
             if not raw:
@@ -41,7 +51,20 @@ def _update_json(path: str, fn: Callable[[Any], Any]) -> Any:
 
     Returns the value returned by *fn*.
     """
-    with open(path, "a+") as f:
+    _ensure_dir(path)
+    if not os.path.exists(path):
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+    else:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+
+    with open(path, "r+", encoding="utf-8") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.seek(0)
         raw = f.read().strip()
@@ -54,16 +77,32 @@ def _update_json(path: str, fn: Callable[[Any], Any]) -> Any:
                 data = _default_for(path)
         new_data = fn(data)
         tmp = path + ".tmp"
-        with open(tmp, "w") as tf:
-            json.dump(new_data, tf, indent=2, ensure_ascii=False)
-            tf.flush()
-            os.fsync(tf.fileno())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            with open(fd, "w", encoding="utf-8") as tf:
+                json.dump(new_data, tf, indent=2, ensure_ascii=False)
+                tf.flush()
+                os.fsync(tf.fileno())
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         os.rename(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
     return new_data
 
 
 def read_profile() -> Dict[str, Any]:
     """Return the family profile dictionary (creates file if missing)."""
+    if not os.path.exists(PROFILE_PATH):
+        _ensure_dir(PROFILE_PATH)
+        _update_json(PROFILE_PATH, lambda d: d)
     return _read_json(PROFILE_PATH)
 
 

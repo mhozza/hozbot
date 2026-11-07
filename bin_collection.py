@@ -79,14 +79,37 @@ def _load_cache(uprn: str) -> list[dict] | None:
 
 
 def _save_cache(uprn: str, services: list[dict]) -> None:
-    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+    cache_dir = os.path.dirname(CACHE_PATH)
+    if cache_dir:
+        os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(cache_dir, 0o700)
+        except OSError:
+            pass
     cache = {
         "uprn": uprn,
         "cached_at": datetime.now(timezone.utc).isoformat(),
         "services": services,
     }
-    with open(CACHE_PATH, "w") as f:
-        json.dump(cache, f)
+    tmp = CACHE_PATH + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.rename(tmp, CACHE_PATH)
+    try:
+        os.chmod(CACHE_PATH, 0o600)
+    except OSError:
+        pass
 
 
 def get_bin_schedule(uprn: str) -> list[dict]:

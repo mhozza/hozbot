@@ -133,6 +133,52 @@ _telegram_bot: Bot | None = None
 _pending_attachment: str | None = None  # set by download_attachment for image follow-up
 
 
+def enforce_storage_permissions(
+    storage_dir: str | None = None,
+    env_file: str | None = None,
+) -> None:
+    """Enforce restricted permissions (0700 for directory, 0600 for sensitive files).
+
+    Ensures storage/ directory is 0700 and all files inside storage/ are 0600.
+    Also ensures .env (if present) is 0600.
+    """
+    if storage_dir is None:
+        storage_dir = os.path.join(BASE_DIR, "storage")
+    if env_file is None:
+        env_file = os.path.join(BASE_DIR, ".env")
+
+    # 1. Enforce 0700 on storage directory
+    os.makedirs(storage_dir, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(storage_dir, 0o700)
+    except OSError as e:
+        logger.warning("Could not set 0700 permissions on %s: %s", storage_dir, e)
+
+    # 2. Enforce 0600 on all files and 0700 on subdirs inside storage directory
+    try:
+        for entry in os.listdir(storage_dir):
+            entry_path = os.path.join(storage_dir, entry)
+            if os.path.isfile(entry_path):
+                try:
+                    os.chmod(entry_path, 0o600)
+                except OSError as e:
+                    logger.warning("Could not set 0600 permissions on %s: %s", entry_path, e)
+            elif os.path.isdir(entry_path):
+                try:
+                    os.chmod(entry_path, 0o700)
+                except OSError as e:
+                    logger.warning("Could not set 0700 permissions on %s: %s", entry_path, e)
+    except OSError as e:
+        logger.warning("Could not list storage directory %s: %s", storage_dir, e)
+
+    # 3. Enforce 0600 on .env file if present
+    if os.path.isfile(env_file):
+        try:
+            os.chmod(env_file, 0o600)
+        except OSError as e:
+            logger.warning("Could not set 0600 permissions on %s: %s", env_file, e)
+
+
 def read_last_digest_time() -> str | None:
     try:
         with open(LAST_DIGEST_PATH) as f:
@@ -142,9 +188,32 @@ def read_last_digest_time() -> str | None:
 
 
 def save_last_digest_time(timestamp_iso: str) -> None:
-    os.makedirs(os.path.dirname(LAST_DIGEST_PATH), exist_ok=True)
-    with open(LAST_DIGEST_PATH, "w") as f:
-        json.dump({"last_digest_at": timestamp_iso}, f)
+    storage_dir = os.path.dirname(LAST_DIGEST_PATH)
+    if storage_dir:
+        os.makedirs(storage_dir, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(storage_dir, 0o700)
+        except OSError:
+            pass
+    tmp = LAST_DIGEST_PATH + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump({"last_digest_at": timestamp_iso}, f)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.rename(tmp, LAST_DIGEST_PATH)
+    try:
+        os.chmod(LAST_DIGEST_PATH, 0o600)
+    except OSError:
+        pass
 
 
 async def safe_reply(message: Message, text: str) -> Message:
@@ -612,9 +681,32 @@ def note_event_skipped(ctx: RunContext[FamilySystemContext], title: str, date: s
             "reason": reason,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
-        os.makedirs(os.path.dirname(SKIPPED_EVENTS_PATH), exist_ok=True)
-        with open(SKIPPED_EVENTS_PATH, "w") as f:
-            json.dump(skipped, f, indent=2)
+        storage_dir = os.path.dirname(SKIPPED_EVENTS_PATH)
+        if storage_dir:
+            os.makedirs(storage_dir, mode=0o700, exist_ok=True)
+            try:
+                os.chmod(storage_dir, 0o700)
+            except OSError:
+                pass
+        tmp = SKIPPED_EVENTS_PATH + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            with open(fd, "w", encoding="utf-8") as f:
+                json.dump(skipped, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        os.rename(tmp, SKIPPED_EVENTS_PATH)
+        try:
+            os.chmod(SKIPPED_EVENTS_PATH, 0o600)
+        except OSError:
+            pass
         return f"Skipped event noted: {title} on {date} ({reason})"
     except Exception as e:
         logger.error("Error in note_event_skipped tool: %s", e, exc_info=True)
@@ -1506,13 +1598,11 @@ def register_handlers(application: Application) -> None:
 
 def main() -> None:
     configure_logging()
+    enforce_storage_permissions()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         logger.error("Missing TELEGRAM_BOT_TOKEN environment variable. Exiting.")
         return
-    # Ensure storage directory exists
-    storage_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "storage")
-    os.makedirs(storage_path, exist_ok=True)
     # Initialize profile JSON file if missing
     try:
         read_profile()
