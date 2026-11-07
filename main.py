@@ -12,7 +12,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 from pydantic_ai import Agent, RunContext, BinaryContent
 from pydantic_ai.exceptions import ModelHTTPError
-from telegram import Update, Message, Bot
+from telegram import Update, Message, Bot, LinkPreviewOptions
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, Defaults
 from telegram_utils import sanitize_telegram_html
 import agent_email
@@ -85,13 +85,22 @@ def save_last_digest_time(timestamp_iso: str) -> None:
 
 
 async def safe_reply(message: Message, text: str) -> Message:
-    """Send a reply with HTML parse mode, sanitizing unsupported tags."""
-    return await message.reply_text(sanitize_telegram_html(text), parse_mode="HTML")
+    """Send a reply with HTML parse mode, sanitizing unsupported tags and disabling link previews."""
+    return await message.reply_text(
+        sanitize_telegram_html(text),
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
 
 
 async def safe_send(bot, chat_id: int, text: str) -> Message:
-    """Send a proactive message with HTML parse mode, sanitizing unsupported tags."""
-    return await bot.send_message(chat_id=chat_id, text=sanitize_telegram_html(text), parse_mode="HTML")
+    """Send a proactive message with HTML parse mode, sanitizing unsupported tags and disabling link previews."""
+    return await bot.send_message(
+        chat_id=chat_id,
+        text=sanitize_telegram_html(text),
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
 
 
 @dataclass
@@ -156,12 +165,30 @@ SYSTEM_PROMPT = open(os.path.join(PROMPTS_DIR, "system_prompt.md")).read().strip
 EMAIL_CHECK_TEMPLATE = Template(open(os.path.join(PROMPTS_DIR, "email_check.md")).read().strip())
 EVENING_DIGEST_TEMPLATE = Template(open(os.path.join(PROMPTS_DIR, "evening_digest.md")).read().strip())
 
-# Initialize PydanticAI Agent with GoogleModel instance
+# Initialize PydanticAI Agent with GoogleModel instance for interactive user chat
 agent = Agent(
     model,
     deps_type=FamilySystemContext,
     capabilities=[Thinking(effort='low')],
     system_prompt=SYSTEM_PROMPT,
+)
+
+# Dedicated isolated agent for unattended background email analysis (SEC-01)
+# Restricts available tools to safe extraction/querying tools only.
+# Specifically excludes dangerous/exfiltrating/poisoning tools:
+# remember_this, delete_calendar_event, update_calendar_event, remove_email_event,
+# send_file_to_chat, extract_pdf_file, download_attachment, search_stored_emails, etc.
+EMAIL_AGENT_SYSTEM_PROMPT = (
+    "You are an automated email analysis assistant for a family office. "
+    "Your objective is to analyze unread emails from the shared inbox, extract dates, "
+    "events, and deadlines, store them in the local database, sync relevant events to "
+    "Google Calendar, and surface urgent items."
+)
+email_agent = Agent(
+    model,
+    deps_type=FamilySystemContext,
+    capabilities=[Thinking(effort='low')],
+    system_prompt=EMAIL_AGENT_SYSTEM_PROMPT,
 )
 
 @agent.system_prompt
@@ -176,6 +203,7 @@ def add_recent_conversation(ctx: RunContext[FamilySystemContext]) -> str:
     return "\n".join(lines)
 
 @agent.system_prompt
+@email_agent.system_prompt
 def add_timezone_info() -> str:
     now = datetime.now(LOCAL_TZ)
     off = now.strftime("%z")
@@ -183,6 +211,7 @@ def add_timezone_info() -> str:
     return f"\n# Timezone\nThe bot operates in {LOCAL_TZ_NAME} (current UTC offset {offset_iso}). All dates and times mentioned are in this timezone unless otherwise specified."
 
 @agent.system_prompt
+@email_agent.system_prompt
 def add_profile_context() -> str:
     profile = read_profile()
     notes = profile.get("critical_notes", [])
@@ -229,6 +258,7 @@ def check_shared_inbox(ctx: RunContext[FamilySystemContext]) -> str:
 from agent_email import extract_pdf_text, fetch_attachment_content_by_uid
 
 @agent.tool
+@email_agent.tool
 def get_profile(ctx: RunContext[FamilySystemContext]) -> str:
     """Return the family profile JSON as a formatted string."""
     profile = read_profile()
@@ -320,6 +350,7 @@ def update_calendar_event(ctx: RunContext[FamilySystemContext], event_id: str, t
         return f"Error updating event: {str(e)}"
 
 @agent.tool
+@email_agent.tool
 def add_email_event(ctx: RunContext[FamilySystemContext], title: str, start_iso: str, end_iso: str | None = None, email_uid: str | None = None, sync_to_gcal: bool = False) -> str:
     """Store an event extracted from an email in the local database.
 
@@ -355,6 +386,7 @@ def add_email_event(ctx: RunContext[FamilySystemContext], title: str, start_iso:
         return f"Error adding email event: {str(e)}"
 
 @agent.tool
+@email_agent.tool
 def sync_email_event_to_gcal(ctx: RunContext[FamilySystemContext], event_id: int) -> str:
     """Publish a locally-stored email event to Google Calendar.
 
@@ -386,6 +418,7 @@ def sync_email_event_to_gcal(ctx: RunContext[FamilySystemContext], event_id: int
         return f"Error syncing event: {str(e)}"
 
 @agent.tool
+@email_agent.tool
 def list_email_events(ctx: RunContext[FamilySystemContext], date: str | None = None, title: str | None = None, check_gcal: bool = False) -> str:
     """List upcoming email-extracted events from the local database.
     Optionally filter by date (YYYY-MM-DD) and/or title (substring match, case-insensitive).
@@ -452,6 +485,7 @@ def remove_email_event(ctx: RunContext[FamilySystemContext], event_id: int) -> s
         return f"Error removing event: {str(e)}"
 
 @agent.tool
+@email_agent.tool
 def update_email_event(ctx: RunContext[FamilySystemContext], event_id: int, title: str | None = None, start_iso: str | None = None, end_iso: str | None = None) -> str:
     """Update an existing email-extracted event's title, start, and/or end time.
     If the event was synced to Google Calendar, the change is pushed there too.
@@ -479,6 +513,7 @@ def update_email_event(ctx: RunContext[FamilySystemContext], event_id: int, titl
         return f"Error updating event: {str(e)}"
 
 @agent.tool
+@email_agent.tool
 def note_event_skipped(ctx: RunContext[FamilySystemContext], title: str, date: str, reason: str = "already exists on a shared calendar") -> str:
     """Record an event that was found in an email but not added because it already exists elsewhere.
 
@@ -524,6 +559,7 @@ def clear_thread_memory(ctx: RunContext[FamilySystemContext], before: str | None
     return "Thread memory cleared."
 
 @agent.tool_plain
+@email_agent.tool_plain
 def get_current_datetime() -> str:
     """Return the current date and time in the local timezone."""
     now = datetime.now(LOCAL_TZ)
@@ -661,17 +697,19 @@ def check_bin_collection() -> str:
     return bin_collection.check_schedule()
 
 
-async def run_agent(prompt, deps, uid: int | None):
-    """Run agent.run(), log prompt + response to memory, return reply text."""
-    response = await agent.run(prompt, deps=deps)
+async def run_agent(prompt, deps, uid: int | None, target_agent: Agent | None = None):
+    """Run agent.run(), log prompt + response to memory if user session, return reply text."""
+    active_agent = target_agent or agent
+    response = await active_agent.run(prompt, deps=deps)
     reply_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
 
-    if isinstance(prompt, str):
-        prompt_text = prompt
-    else:
-        prompt_text = " ".join(str(p) for p in prompt if isinstance(p, str)) or "[Media]"
-    memory.add_message(uid, prompt_text)
-    memory.add_message(uid, reply_text)
+    if uid is not None:
+        if isinstance(prompt, str):
+            prompt_text = prompt
+        else:
+            prompt_text = " ".join(str(p) for p in prompt if isinstance(p, str)) or "[Media]"
+        memory.add_message(uid, prompt_text)
+        memory.add_message(uid, reply_text)
 
     return reply_text
 
@@ -877,7 +915,7 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if len(final_prompt) == 1:
             final_prompt = final_prompt[0]
 
-        reply_text = await run_agent(final_prompt, deps=system_ctx, uid=None)
+        reply_text = await run_agent(final_prompt, deps=system_ctx, uid=None, target_agent=email_agent)
 
         logger.info("Email check agent response:\n%s", reply_text)
 
@@ -897,6 +935,7 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 body = stripped[len("[ERROR]"):].strip()
                 message = "❌ <b>Error during email check:</b>\n\n" + body
                 logger.info("Scheduled email check: error encountered, notifying users")
+            memory.add_message(None, message)
             for uid in ALLOWED_USER_IDS:
                 try:
                     await safe_send(context.bot, uid, message)
@@ -1039,7 +1078,7 @@ async def generate_digest_text(uid: int | None = None) -> str:
         local_offset=local_offset_iso,
     )
 
-    result = await run_agent(prompt, deps=system_ctx, uid=uid)
+    result = await run_agent(prompt, deps=system_ctx, uid=None)
 
     elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
     logger.info("Digest: done in %.1fs, response:\n%s", elapsed, result)
@@ -1129,6 +1168,7 @@ async def evening_digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception as e:
                 logger.error(f"Failed to send digest to user {uid}: {e}")
 
+        memory.add_message(None, digest_text)
         save_last_digest_time(datetime.now(timezone.utc).isoformat())
         DIGEST_RETRY_ATTEMPT = 1
         logger.info("Evening digest: sent successfully")
@@ -1157,7 +1197,7 @@ async def shutdown_bye_job(app: Application) -> None:
     text = "👋 <b>Hozbot is shutting down.</b> See you next time!"
     for uid in SEND_HI_BYE_USER_IDS:
         try:
-            await app.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+            await safe_send(app.bot, uid, text)
         except Exception as e:
             logger.error(f"Failed to send shutdown message to user {uid}: {e}")
 
@@ -1196,7 +1236,11 @@ def main() -> None:
     application = (
         Application.builder()
         .token(token)
-        .defaults(Defaults(tzinfo=LOCAL_TZ))
+        .defaults(Defaults(
+            tzinfo=LOCAL_TZ,
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        ))
         .post_stop(shutdown_bye_job)
         .build()
     )
