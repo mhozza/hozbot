@@ -28,10 +28,71 @@ import memory
 from dataclasses import field
 import bin_collection
 # Configure logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+def is_debug_mode(environment: str | None = None, debug: bool | str | None = None) -> bool:
+    """Determine whether debug/development mode is active.
+
+    Explicit arguments take precedence over environment variables.
+    Defaults to False (release mode) if unspecified.
+    """
+    if debug is not None:
+        if isinstance(debug, bool):
+            return debug
+        return str(debug).strip().lower() in ("1", "true", "yes", "t", "on", "dev", "development", "debug")
+
+    if environment is not None:
+        return environment.strip().lower() in ("development", "dev", "debug", "test", "testing", "local")
+
+    debug_env = os.getenv("DEBUG")
+    if debug_env is not None:
+        return debug_env.strip().lower() in ("1", "true", "yes", "t", "on", "dev", "development", "debug")
+
+    env_val = os.getenv("ENVIRONMENT") or os.getenv("ENV")
+    if env_val is not None:
+        return env_val.strip().lower() in ("development", "dev", "debug", "test", "testing", "local")
+
+    return False
+
+
+def configure_logging(environment: str | None = None, debug: bool | str | None = None) -> bool:
+    """Configure logging for hozbot, httpx, and httpcore.
+
+    In release mode (default):
+    - Suppress INFO request logging for httpx and httpcore (set to WARNING) to prevent
+      plaintext TELEGRAM_BOT_TOKEN exposure in Telegram API polling logs.
+    - Set root and application loggers to INFO.
+    - Downgrade full LLM response logs to DEBUG so private schedule/email details are suppressed.
+
+    In development/debug mode:
+    - Set root and application loggers to DEBUG.
+    - Set httpx and httpcore loggers to DEBUG, retaining verbose HTTP request logs.
+    - Full LLM response logs are emitted.
+
+    Returns:
+        bool: True if debug/development mode is active, False if release mode.
+    """
+    is_debug = is_debug_mode(environment=environment, debug=debug)
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    target_level = logging.DEBUG if is_debug else logging.INFO
+
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(format=log_format, level=target_level)
+    else:
+        root_logger.setLevel(target_level)
+
+    if is_debug:
+        logging.getLogger("httpx").setLevel(logging.DEBUG)
+        logging.getLogger("httpcore").setLevel(logging.DEBUG)
+        logging.getLogger(__name__).setLevel(logging.DEBUG)
+    else:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger(__name__).setLevel(logging.INFO)
+
+    return is_debug
+
+
+configure_logging()
 logger = logging.getLogger(__name__)
 
 # Parse whitelisted user IDs
@@ -983,7 +1044,7 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         reply_text = await run_agent(final_prompt, deps=system_ctx, uid=None, target_agent=email_agent)
 
-        logger.info("Email check agent response:\n%s", reply_text)
+        logger.debug("Email check agent response:\n%s", reply_text)
 
         uid_ints = [int(e['uid']) for e in emails]
         try:
@@ -1147,7 +1208,8 @@ async def generate_digest_text(uid: int | None = None) -> str:
     result = await run_agent(prompt, deps=system_ctx, uid=None)
 
     elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
-    logger.info("Digest: done in %.1fs, response:\n%s", elapsed, result)
+    logger.info("Digest: done in %.1fs", elapsed)
+    logger.debug("Digest: done in %.1fs, response:\n%s", elapsed, result)
     return result
 
 
@@ -1269,6 +1331,7 @@ async def shutdown_bye_job(app: Application) -> None:
 
 
 def main() -> None:
+    configure_logging()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         logger.error("Missing TELEGRAM_BOT_TOKEN environment variable. Exiting.")
