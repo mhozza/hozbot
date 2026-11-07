@@ -13,6 +13,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 from pydantic_ai import Agent, RunContext, BinaryContent
 from pydantic_ai.exceptions import ModelHTTPError
 from telegram import Update, Message, Bot, LinkPreviewOptions, constants
+from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, Defaults
 from telegram_utils import sanitize_telegram_html
 import agent_email
@@ -215,6 +216,36 @@ def save_last_digest_time(timestamp_iso: str) -> None:
         os.chmod(LAST_DIGEST_PATH, 0o600)
     except OSError:
         pass
+
+
+async def _send_typing_loop(bot: Bot, chat_id: int, interval_seconds: float = 4.0) -> None:
+    """Continuously emit the typing chat action until cancelled."""
+    while True:
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        except Exception as e:
+            logger.debug(f"Failed to send typing chat action to chat {chat_id}: {e}")
+        await asyncio.sleep(interval_seconds)
+
+
+class _TypingContext:
+    """Context manager to run a typing indicator in the background."""
+    def __init__(self, bot: Bot, chat_id: int):
+        self.bot = bot
+        self.chat_id = chat_id
+        self._task: asyncio.Task | None = None
+
+    async def __aenter__(self):
+        self._task = asyncio.create_task(_send_typing_loop(self.bot, self.chat_id))
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
 
 
 async def safe_reply(message: Message, text: str) -> Message:
@@ -1082,25 +1113,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         thread_memory=prior_memory,
     )
 
+    # Send immediate 'eyes' reaction to acknowledge receipt
+    if update.message:
+        try:
+            await context.bot.set_message_reaction(
+                chat_id=chat.id,
+                message_id=update.message.message_id,
+                reaction="👀",
+            )
+        except Exception as e:
+            logger.debug(f"Could not set reaction on message {update.message.message_id}: {e}")
+
     try:
         logger.info(f"[user {user.id}] [stage:prep] Context prepared with {len(prior_memory)} memory turns. Invoking agent...")
-        reply_text = await run_agent(prompt, deps=sys_ctx, uid=user.id)
+        async with _TypingContext(context.bot, chat.id):
+            reply_text = await run_agent(prompt, deps=sys_ctx, uid=user.id)
 
-        # Follow-up: if the agent downloaded an image, feed it to the model visually
-        if _pending_attachment is not None:
-            file_path = _pending_attachment
-            _pending_attachment = None
-            mime_type, _ = mimetypes.guess_type(file_path)
-            if mime_type and mime_type.startswith('image/'):
-                try:
-                    with open(file_path, "rb") as f:
-                        img_data = f.read()
-                    follow_up: list = [text] if text else ["Analyze this attachment."]
-                    follow_up.append(BinaryContent(data=img_data, media_type=mime_type))
-                    logger.info(f"[user {user.id}] [stage:image_followup] Sending downloaded image attachment for visual analysis...")
-                    reply_text = await run_agent(follow_up, deps=sys_ctx, uid=user.id)
-                except Exception as e:
-                    logger.error(f"Failed to analyze image attachment: {e}", exc_info=True)
+            # Follow-up: if the agent downloaded an image, feed it to the model visually
+            if _pending_attachment is not None:
+                file_path = _pending_attachment
+                _pending_attachment = None
+                mime_type, _ = mimetypes.guess_type(file_path)
+                if mime_type and mime_type.startswith('image/'):
+                    try:
+                        with open(file_path, "rb") as f:
+                            img_data = f.read()
+                        follow_up: list = [text] if text else ["Analyze this attachment."]
+                        follow_up.append(BinaryContent(data=img_data, media_type=mime_type))
+                        logger.info(f"[user {user.id}] [stage:image_followup] Sending downloaded image attachment for visual analysis...")
+                        reply_text = await run_agent(follow_up, deps=sys_ctx, uid=user.id)
+                    except Exception as e:
+                        logger.error(f"Failed to analyze image attachment: {e}", exc_info=True)
 
         if update.message:
             t_reply = time_mod.perf_counter()
