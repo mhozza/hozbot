@@ -20,6 +20,7 @@ import email_store
 from pydantic_ai.capabilities import Thinking
 import asyncio
 from datetime import date, datetime, time, timezone, timedelta
+import time as time_mod
 from zoneinfo import ZoneInfo
 from database import read_profile, append_fact
 import json
@@ -951,8 +952,15 @@ def check_bin_collection() -> str:
 async def run_agent(prompt, deps, uid: int | None, target_agent: Agent | None = None):
     """Run agent.run(), log prompt + response to memory if user session, return reply text."""
     active_agent = target_agent or agent
+    agent_name = "email_agent" if active_agent is email_agent else "primary_agent"
+    user_label = f"user {uid}" if uid is not None else "system"
+    prompt_len = len(prompt) if isinstance(prompt, str) else len(str(prompt))
+    logger.info(f"[{user_label}] [stage:llm_start] Agent '{agent_name}' running with prompt length {prompt_len}...")
+    t0 = time_mod.perf_counter()
     response = await active_agent.run(prompt, deps=deps)
+    elapsed = time_mod.perf_counter() - t0
     reply_text = getattr(response, "output", None) or getattr(response, "data", None) or str(response)
+    logger.info(f"[{user_label}] [stage:llm_done] Agent '{agent_name}' finished in {elapsed:.2f}s (output: {len(reply_text)} chars)")
 
     if uid is not None:
         if isinstance(prompt, str):
@@ -987,11 +995,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     user = update.effective_user
+    t_start = time_mod.perf_counter()
 
     # Get text from either plain message or media caption
     text = update.message.text or update.message.caption or ""
 
-    logger.info(f"Received message from authorized user {user.id} ({user.first_name})")
+    logger.info(f"[user {user.id}] [stage:received] Received message from authorized user {user.id} ({user.first_name}): {text[:100]!r}")
 
     # Build content for the agent (text + optional media)
     content_parts: list = []
@@ -1019,7 +1028,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 else:
                     image_bytes = await file.download_as_bytearray()
                     content_parts.append(BinaryContent(data=bytes(image_bytes), media_type='image/jpeg'))
-                    logger.info(f"Downloaded photo {photo.file_id} ({len(image_bytes)} bytes)")
+                    logger.info(f"[user {user.id}] [stage:media] Downloaded photo {photo.file_id} ({len(image_bytes)} bytes)")
         except Exception as e:
             logger.error(f"Failed to download photo: {e}", exc_info=True)
 
@@ -1055,7 +1064,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     else:
                         doc_bytes = await file.download_as_bytearray()
                         content_parts.append(BinaryContent(data=bytes(doc_bytes), media_type=doc.mime_type))
-                        logger.info(f"Downloaded document {doc.file_name} ({len(doc_bytes)} bytes, {doc.mime_type})")
+                        logger.info(f"[user {user.id}] [stage:media] Downloaded document {doc.file_name} ({len(doc_bytes)} bytes, {doc.mime_type})")
             except Exception as e:
                 logger.error(f"Failed to download document: {e}", exc_info=True)
 
@@ -1074,6 +1083,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     try:
+        logger.info(f"[user {user.id}] [stage:prep] Context prepared with {len(prior_memory)} memory turns. Invoking agent...")
         reply_text = await run_agent(prompt, deps=sys_ctx, uid=user.id)
 
         # Follow-up: if the agent downloaded an image, feed it to the model visually
@@ -1087,14 +1097,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         img_data = f.read()
                     follow_up: list = [text] if text else ["Analyze this attachment."]
                     follow_up.append(BinaryContent(data=img_data, media_type=mime_type))
+                    logger.info(f"[user {user.id}] [stage:image_followup] Sending downloaded image attachment for visual analysis...")
                     reply_text = await run_agent(follow_up, deps=sys_ctx, uid=user.id)
                 except Exception as e:
                     logger.error(f"Failed to analyze image attachment: {e}", exc_info=True)
 
         if update.message:
+            t_reply = time_mod.perf_counter()
             await safe_reply(update.message, reply_text)
+            total_elapsed = time_mod.perf_counter() - t_start
+            reply_elapsed = time_mod.perf_counter() - t_reply
+            logger.info(f"[user {user.id}] [stage:reply_sent] Message reply sent in {reply_elapsed:.2f}s (total turnaround: {total_elapsed:.2f}s)")
     except Exception as e:
-        logger.error(f"Failed to process request with agent: {e}", exc_info=True)
+        total_elapsed = time_mod.perf_counter() - t_start
+        logger.error(f"[user {user.id}] [stage:error] Failed to process request after {total_elapsed:.2f}s: {e}", exc_info=True)
         if update.message:
             await safe_reply(update.message, "Sorry, an error occurred while processing your request.")
 
