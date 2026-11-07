@@ -25,7 +25,12 @@ uv run main.py
 ```bash
 docker compose up --build -d
 ```
-The Dockerfile uses a multi-stage build with `ghcr.io/astral-sh/uv:python3.13-alpine` for dependency syncing, then a minimal `python:3.13-alpine` runtime stage.
+The Dockerfile uses a multi-stage build with `ghcr.io/astral-sh/uv:python3.13-alpine` for dependency syncing, then a minimal `python:3.13-alpine` runtime stage running under unprivileged user `hozbot` (UID 10001).
+
+> **Note on Storage Volume Ownership**: If running on Linux with mounted `./storage` and `./downloads` volumes, ensure UID 10001 has write access:
+> ```bash
+> sudo chown -R 10001:10001 storage downloads
+> ```
 
 ## Environment Variables (`.env`)
 | Variable | Description |

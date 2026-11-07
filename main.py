@@ -154,7 +154,17 @@ def enforce_storage_permissions(
     try:
         os.chmod(storage_dir, 0o700)
     except OSError as e:
-        logger.warning("Could not set 0700 permissions on %s: %s", storage_dir, e)
+        logger.debug("Could not set 0700 permissions on %s: %s", storage_dir, e)
+
+    # Verify write access to storage directory early with helpful diagnostics
+    if not os.access(storage_dir, os.W_OK):
+        logger.error(
+            "Storage directory %s is not writable by the current user (uid=%s). "
+            "If running in Docker with a mounted volume, run on host: "
+            "'sudo chown -R 10001:10001 storage downloads'",
+            storage_dir,
+            os.getuid() if hasattr(os, "getuid") else "unknown",
+        )
 
     # 2. Enforce 0600 on all files and 0700 on subdirs inside storage directory
     try:
@@ -164,12 +174,12 @@ def enforce_storage_permissions(
                 try:
                     os.chmod(entry_path, 0o600)
                 except OSError as e:
-                    logger.warning("Could not set 0600 permissions on %s: %s", entry_path, e)
+                    logger.debug("Could not set 0600 permissions on %s: %s", entry_path, e)
             elif os.path.isdir(entry_path):
                 try:
                     os.chmod(entry_path, 0o700)
                 except OSError as e:
-                    logger.warning("Could not set 0700 permissions on %s: %s", entry_path, e)
+                    logger.debug("Could not set 0700 permissions on %s: %s", entry_path, e)
     except OSError as e:
         logger.warning("Could not list storage directory %s: %s", storage_dir, e)
 
@@ -178,7 +188,7 @@ def enforce_storage_permissions(
         try:
             os.chmod(env_file, 0o600)
         except OSError as e:
-            logger.warning("Could not set 0600 permissions on %s: %s", env_file, e)
+            logger.debug("Could not set 0600 permissions on %s: %s", env_file, e)
 
 
 def read_last_digest_time() -> str | None:
