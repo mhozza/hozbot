@@ -149,8 +149,14 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
+
+# Secrets and credentials
+credentials.json
+*token*.json
 env/
 venv/
 ENV/
@@ -219,3 +225,7 @@ __marimo__/
 
 # Storage
 storage/
+storage/*.json
+
+# Agent scratch & coordination state
+.agents/
