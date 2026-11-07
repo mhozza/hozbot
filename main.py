@@ -318,7 +318,21 @@ def check_shared_inbox(ctx: RunContext[FamilySystemContext]) -> str:
         logger.error(f"Error in check_shared_inbox tool: {e}", exc_info=True)
         return f"Error retrieving emails: {str(e)}"
 
-from agent_email import extract_pdf_text, fetch_attachment_content_by_uid
+from agent_email import (
+    extract_pdf_text,
+    fetch_attachment_content_by_uid,
+    DEFAULT_MAX_PDF_PAGES,
+    DEFAULT_MAX_PDF_CHARS,
+    DEFAULT_MAX_PDF_SIZE_BYTES,
+    DEFAULT_IMAP_TIMEOUT,
+    DEFAULT_MAX_UNREAD_EMAILS,
+)
+
+# Resource limits and poison-pill protection (SEC-05)
+MAX_DOCUMENT_SIZE_BYTES = DEFAULT_MAX_PDF_SIZE_BYTES  # 20MB
+MAX_ATTACHMENT_SIZE_BYTES = DEFAULT_MAX_PDF_SIZE_BYTES  # 20MB
+MAX_EMAIL_FAILURES = 3
+_email_failure_counts: dict[str, int] = {}
 
 @agent.tool
 @email_agent.tool
@@ -719,6 +733,14 @@ def download_attachment(ctx: RunContext[FamilySystemContext], uid: str, filename
         data = fetch_attachment_content_by_uid(uid, filename)
         if data is None:
             return f"Attachment '{filename}' not found in email UID {uid}."
+        if len(data) > MAX_ATTACHMENT_SIZE_BYTES:
+            logger.warning(
+                "Attachment '%s' size (%d bytes) exceeds maximum allowed limit (%d bytes)",
+                filename,
+                len(data),
+                MAX_ATTACHMENT_SIZE_BYTES,
+            )
+            return f"Error: Attachment '{filename}' size ({len(data)} bytes) exceeds maximum limit ({MAX_ATTACHMENT_SIZE_BYTES} bytes)."
         safe_filename = os.path.basename(filename)
         os.makedirs(DOWNLOADS_DIR, exist_ok=True)
         file_path = os.path.join(DOWNLOADS_DIR, f"{uid}_{safe_filename}")
@@ -754,6 +776,16 @@ def extract_pdf_file(ctx: RunContext[FamilySystemContext], file_path: str) -> st
         return f"File not found: {file_path}"
 
     try:
+        file_size = os.path.getsize(resolved_path)
+        if file_size > MAX_DOCUMENT_SIZE_BYTES:
+            logger.warning(
+                "Rejected extract_pdf_file: file '%s' size (%d bytes) exceeds limit (%d bytes)",
+                file_path,
+                file_size,
+                MAX_DOCUMENT_SIZE_BYTES,
+            )
+            return f"Error: PDF file size ({file_size} bytes) exceeds maximum allowed limit ({MAX_DOCUMENT_SIZE_BYTES} bytes)."
+
         with open(resolved_path, "rb") as f:
             pdf_bytes = f.read()
         text = extract_pdf_text(pdf_bytes)
@@ -878,10 +910,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if update.message and update.message.photo:
         photo = update.message.photo[-1]
         try:
-            file = await context.bot.get_file(photo.file_id)
-            image_bytes = await file.download_as_bytearray()
-            content_parts.append(BinaryContent(data=bytes(image_bytes), media_type='image/jpeg'))
-            logger.info(f"Downloaded photo {photo.file_id} ({len(image_bytes)} bytes)")
+            if photo.file_size and photo.file_size > MAX_DOCUMENT_SIZE_BYTES:
+                logger.warning(
+                    "Photo size (%d bytes) exceeds limit of %d bytes. Skipping download.",
+                    photo.file_size,
+                    MAX_DOCUMENT_SIZE_BYTES,
+                )
+            else:
+                file = await context.bot.get_file(photo.file_id)
+                if file.file_size and file.file_size > MAX_DOCUMENT_SIZE_BYTES:
+                    logger.warning(
+                        "Photo file size (%d bytes) exceeds limit of %d bytes. Skipping download.",
+                        file.file_size,
+                        MAX_DOCUMENT_SIZE_BYTES,
+                    )
+                else:
+                    image_bytes = await file.download_as_bytearray()
+                    content_parts.append(BinaryContent(data=bytes(image_bytes), media_type='image/jpeg'))
+                    logger.info(f"Downloaded photo {photo.file_id} ({len(image_bytes)} bytes)")
         except Exception as e:
             logger.error(f"Failed to download photo: {e}", exc_info=True)
 
@@ -890,10 +936,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         doc = update.message.document
         if doc.mime_type and (doc.mime_type.startswith('image/') or doc.mime_type == 'application/pdf'):
             try:
-                file = await context.bot.get_file(doc.file_id)
-                doc_bytes = await file.download_as_bytearray()
-                content_parts.append(BinaryContent(data=bytes(doc_bytes), media_type=doc.mime_type))
-                logger.info(f"Downloaded document {doc.file_name} ({len(doc_bytes)} bytes, {doc.mime_type})")
+                if doc.file_size and doc.file_size > MAX_DOCUMENT_SIZE_BYTES:
+                    logger.warning(
+                        "Document %s size (%d bytes) exceeds limit of %d bytes. Skipping download.",
+                        doc.file_name,
+                        doc.file_size,
+                        MAX_DOCUMENT_SIZE_BYTES,
+                    )
+                    await safe_reply(
+                        update.message,
+                        f"⚠️ Document '{doc.file_name or 'file'}' exceeds the maximum allowed size of 20MB and was not processed.",
+                    )
+                else:
+                    file = await context.bot.get_file(doc.file_id)
+                    if file.file_size and file.file_size > MAX_DOCUMENT_SIZE_BYTES:
+                        logger.warning(
+                            "Document file %s size (%d bytes) exceeds limit of %d bytes. Skipping download.",
+                            doc.file_name,
+                            file.file_size,
+                            MAX_DOCUMENT_SIZE_BYTES,
+                        )
+                        await safe_reply(
+                            update.message,
+                            f"⚠️ Document '{doc.file_name or 'file'}' exceeds the maximum allowed size of 20MB and was not processed.",
+                        )
+                    else:
+                        doc_bytes = await file.download_as_bytearray()
+                        content_parts.append(BinaryContent(data=bytes(doc_bytes), media_type=doc.mime_type))
+                        logger.info(f"Downloaded document {doc.file_name} ({len(doc_bytes)} bytes, {doc.mime_type})")
             except Exception as e:
                 logger.error(f"Failed to download document: {e}", exc_info=True)
 
@@ -961,16 +1031,58 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Scheduled email check: starting")
     try:
-        emails = agent_email.fetch_unread_emails()
+        emails = await asyncio.to_thread(agent_email.fetch_unread_emails)
         if not emails:
             logger.info("Scheduled email check: no new emails")
             return
 
+        # Check for poison-pill UIDs that repeatedly failed (SEC-05)
+        valid_emails = []
+        poison_pill_uids = []
+        for email_data in emails:
+            uid = str(email_data.get("uid", ""))
+            fails = _email_failure_counts.get(uid, 0)
+            if fails >= MAX_EMAIL_FAILURES:
+                try:
+                    poison_pill_uids.append(int(uid))
+                except (ValueError, TypeError):
+                    pass
+                logger.error(
+                    "Email UID %s exceeded failure threshold (%d attempts). "
+                    "Marking as read to prevent poison-pill crash loop.",
+                    uid,
+                    fails,
+                )
+            else:
+                valid_emails.append(email_data)
+
+        if poison_pill_uids:
+            try:
+                await asyncio.to_thread(agent_email.mark_emails_as_read, poison_pill_uids)
+            except Exception as e:
+                logger.error(f"Failed to mark poison-pill emails as read: {e}")
+            for p_uid in poison_pill_uids:
+                _email_failure_counts.pop(str(p_uid), None)
+
+        if not valid_emails:
+            logger.info("Scheduled email check: no valid unread emails remaining after filtering poison pills")
+            return
+
+        emails = valid_emails
+
+        # Increment failure count for current run (cleared upon success)
+        for email_data in emails:
+            uid_str = str(email_data.get("uid", ""))
+            _email_failure_counts[uid_str] = _email_failure_counts.get(uid_str, 0) + 1
+
         email_ids_by_uid: dict[str, int] = {}
         for email_data in emails:
-            eid = email_store.store_email(email_data)
-            if eid is not None:
-                email_ids_by_uid[email_data["uid"]] = eid
+            try:
+                eid = email_store.store_email(email_data)
+                if eid is not None:
+                    email_ids_by_uid[email_data["uid"]] = eid
+            except Exception as store_err:
+                logger.error("Failed to store email UID %s: %s", email_data.get("uid"), store_err)
 
         profile = read_profile()
         profile_summary = f"Family Profile:\n{json.dumps(profile, indent=2)}\n"
@@ -982,60 +1094,87 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         image_contents: list = []
         for idx, email_data in enumerate(emails, 1):
             uid = email_data["uid"]
-            summary = (
-                f"[{idx}] UID: {uid}\n"
-                f"From: {email_data['sender']}\n"
-                f"Subject: {email_data['subject']}\n"
-                f"Content: {email_data['body_snippet']}\n"
-            )
-            if email_data['attachments']:
-                for att in email_data['attachments']:
-                    if att['mime_type'] == 'application/pdf':
-                        try:
-                            cached = email_store.get_downloaded_path(uid, att['filename'])
-                            if cached:
-                                with open(cached, "rb") as f:
-                                    pdf_text = extract_pdf_text(f.read())
-                            else:
-                                pdf_bytes = fetch_attachment_content_by_uid(uid, att['filename'])
-                                if pdf_bytes:
-                                    pdf_text = extract_pdf_text(pdf_bytes)
-                                    safe_filename = os.path.basename(att['filename'])
-                                    file_path = os.path.join(out_dir, f"{uid}_{safe_filename}")
-                                    with open(file_path, "wb") as f:
-                                        f.write(pdf_bytes)
-                                    eid = email_ids_by_uid.get(uid)
-                                    if eid:
-                                        email_store.update_attachment_local_path(eid, att['filename'], file_path)
+            try:
+                summary = (
+                    f"[{idx}] UID: {uid}\n"
+                    f"From: {email_data.get('sender', '')}\n"
+                    f"Subject: {email_data.get('subject', '')}\n"
+                    f"Content: {email_data.get('body_snippet', '')}\n"
+                )
+                if email_data.get('attachments'):
+                    for att in email_data['attachments']:
+                        att_filename = att.get('filename', 'attachment')
+                        att_size = att.get('size_bytes', 0)
+                        if att_size > MAX_ATTACHMENT_SIZE_BYTES:
+                            logger.warning(
+                                "Skipping attachment '%s' in email %s: size %d exceeds limit %d",
+                                att_filename,
+                                uid,
+                                att_size,
+                                MAX_ATTACHMENT_SIZE_BYTES,
+                            )
+                            summary += f"\n[Attachment '{att_filename}' omitted: exceeds size limit]\n"
+                            continue
+
+                        if att.get('mime_type') == 'application/pdf':
+                            try:
+                                cached = email_store.get_downloaded_path(uid, att_filename)
+                                if cached and os.path.exists(cached):
+                                    if os.path.getsize(cached) <= MAX_ATTACHMENT_SIZE_BYTES:
+                                        with open(cached, "rb") as f:
+                                            pdf_text = extract_pdf_text(f.read())
+                                    else:
+                                        pdf_text = ""
                                 else:
-                                    pdf_text = ""
-                            if pdf_text:
-                                summary += f"\nExtracted text from '{att['filename']}':\n{pdf_text}\n"
-                        except Exception as e:
-                            logger.error(f"Failed to extract PDF from {att['filename']} in email {uid}: {e}")
-                    elif att['mime_type'].startswith('image/'):
-                        try:
-                            cached = email_store.get_downloaded_path(uid, att['filename'])
-                            if cached:
-                                with open(cached, "rb") as f:
-                                    img_data = f.read()
-                            else:
-                                img_data = fetch_attachment_content_by_uid(uid, att['filename'])
+                                    pdf_bytes = await asyncio.to_thread(fetch_attachment_content_by_uid, uid, att_filename)
+                                    if pdf_bytes and len(pdf_bytes) <= MAX_ATTACHMENT_SIZE_BYTES:
+                                        pdf_text = extract_pdf_text(pdf_bytes)
+                                        safe_filename = os.path.basename(att_filename)
+                                        file_path = os.path.join(out_dir, f"{uid}_{safe_filename}")
+                                        with open(file_path, "wb") as f:
+                                            f.write(pdf_bytes)
+                                        eid = email_ids_by_uid.get(uid)
+                                        if eid:
+                                            email_store.update_attachment_local_path(eid, att_filename, file_path)
+                                    else:
+                                        pdf_text = ""
+                                if pdf_text:
+                                    summary += f"\nExtracted text from '{att_filename}':\n{pdf_text}\n"
+                            except Exception as e:
+                                logger.error(f"Failed to extract PDF from {att_filename} in email {uid}: {e}")
+                                summary += f"\n[Attachment '{att_filename}': extraction error]\n"
+                        elif att.get('mime_type', '').startswith('image/'):
+                            try:
+                                cached = email_store.get_downloaded_path(uid, att_filename)
+                                if cached and os.path.exists(cached):
+                                    if os.path.getsize(cached) <= MAX_ATTACHMENT_SIZE_BYTES:
+                                        with open(cached, "rb") as f:
+                                            img_data = f.read()
+                                    else:
+                                        img_data = None
+                                else:
+                                    img_data = await asyncio.to_thread(fetch_attachment_content_by_uid, uid, att_filename)
+                                    if img_data and len(img_data) <= MAX_ATTACHMENT_SIZE_BYTES:
+                                        safe_filename = os.path.basename(att_filename)
+                                        file_path = os.path.join(out_dir, f"{uid}_{safe_filename}")
+                                        with open(file_path, "wb") as f:
+                                            f.write(img_data)
+                                        eid = email_ids_by_uid.get(uid)
+                                        if eid:
+                                            email_store.update_attachment_local_path(eid, att_filename, file_path)
+                                    else:
+                                        img_data = None
                                 if img_data:
-                                    safe_filename = os.path.basename(att['filename'])
-                                    file_path = os.path.join(out_dir, f"{uid}_{safe_filename}")
-                                    with open(file_path, "wb") as f:
-                                        f.write(img_data)
-                                    eid = email_ids_by_uid.get(uid)
-                                    if eid:
-                                        email_store.update_attachment_local_path(eid, att['filename'], file_path)
-                            if img_data:
-                                image_contents.append(BinaryContent(data=img_data, media_type=att['mime_type']))
-                        except Exception as e:
-                            logger.error(f"Failed to process image {att['filename']} in email {uid}: {e}")
-                att_lines = [f"  - {a['filename']} ({a['mime_type']}, {a['size_bytes']} bytes)" for a in email_data['attachments']]
-                summary += "Attachments:\n" + "\n".join(att_lines) + "\n"
-            email_summary_lines.append(summary)
+                                    image_contents.append(BinaryContent(data=img_data, media_type=att['mime_type']))
+                            except Exception as e:
+                                logger.error(f"Failed to process image {att_filename} in email {uid}: {e}")
+                    att_lines = [f"  - {a['filename']} ({a['mime_type']}, {a['size_bytes']} bytes)" for a in email_data['attachments']]
+                    summary += "Attachments:\n" + "\n".join(att_lines) + "\n"
+                email_summary_lines.append(summary)
+            except Exception as single_err:
+                logger.error("Error processing email UID %s: %s", uid, single_err, exc_info=True)
+                email_summary_lines.append(f"[{idx}] UID: {uid}\n[Error processing email content]\n")
+
         email_summary = profile_summary + "\n---\n".join(email_summary_lines)
 
         system_ctx = FamilySystemContext(
@@ -1066,9 +1205,13 @@ async def check_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         uid_ints = [int(e['uid']) for e in emails]
         try:
-            agent_email.mark_emails_as_read(uid_ints)
+            await asyncio.to_thread(agent_email.mark_emails_as_read, uid_ints)
         except Exception as e:
             logger.error(f"Failed to mark emails as read: {e}")
+
+        # Successfully finished processing these emails, clear failure records
+        for email_data in emails:
+            _email_failure_counts.pop(str(email_data["uid"]), None)
 
         stripped = reply_text.strip()
         if stripped.startswith("[URGENT]") or stripped.startswith("[ERROR]"):

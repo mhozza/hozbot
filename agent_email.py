@@ -6,9 +6,18 @@ from html.parser import HTMLParser
 from imapclient import IMAPClient
 from dotenv import load_dotenv
 from typing import Any
+from io import BytesIO
 import logging
+from pypdf import PdfReader
 
 logger = logging.getLogger(__name__)
+
+# Security and resource limits (SEC-05)
+DEFAULT_IMAP_TIMEOUT = 30
+DEFAULT_MAX_UNREAD_EMAILS = 20
+DEFAULT_MAX_PDF_PAGES = 30
+DEFAULT_MAX_PDF_CHARS = 100_000
+DEFAULT_MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024  # 20MB
 
 class HTMLTextExtractor(HTMLParser):
     def __init__(self):
@@ -44,7 +53,10 @@ def decode_mime_header(header_value: str) -> str:
             result.append(str(part))
     return "".join(result)
 
-def fetch_unread_emails() -> list[dict[str, Any]]:
+def fetch_unread_emails(
+    max_emails: int = DEFAULT_MAX_UNREAD_EMAILS,
+    timeout: int = DEFAULT_IMAP_TIMEOUT,
+) -> list[dict[str, Any]]:
     imap_server = os.getenv("EMAIL_IMAP_SERVER")
     email_address = os.getenv("EMAIL_ADDRESS")
     email_password = os.getenv("EMAIL_APP_PASSWORD")
@@ -54,8 +66,8 @@ def fetch_unread_emails() -> list[dict[str, Any]]:
         
     emails_data = []
     
-    # Connect using IMAPClient
-    with IMAPClient(imap_server, ssl=True) as client:
+    # Connect using IMAPClient with explicit socket timeout
+    with IMAPClient(imap_server, ssl=True, timeout=timeout) as client:
         client.login(email_address, email_password)
         client.select_folder("INBOX", readonly=True)
         
@@ -65,8 +77,27 @@ def fetch_unread_emails() -> list[dict[str, Any]]:
         if not messages:
             return emails_data
             
-        # Fetch RFC822 messages
-        response = client.fetch(messages, ["RFC822"])
+        # Cap the number of unread emails fetched/processed in a single run (SEC-05)
+        if max_emails is not None and max_emails > 0 and len(messages) > max_emails:
+            logger.info(
+                "Capping unread emails fetch from %d to %d latest messages",
+                len(messages),
+                max_emails,
+            )
+            messages = messages[-max_emails:]
+
+        # Fetch RFC822 messages with single-message fallback on batch failure
+        try:
+            response = client.fetch(messages, ["RFC822"])
+        except Exception as fetch_err:
+            logger.warning("Batch fetch failed (%s); falling back to single-message fetch.", fetch_err)
+            response = {}
+            for msg_id in messages:
+                try:
+                    single_resp = client.fetch([msg_id], ["RFC822"])
+                    response.update(single_resp)
+                except Exception as single_err:
+                    logger.error("Failed to fetch email UID %s: %s", msg_id, single_err)
         
         for msg_id, data in response.items():
             try:
@@ -145,14 +176,18 @@ def fetch_unread_emails() -> list[dict[str, Any]]:
                 
     return emails_data
 
-def fetch_attachment_content_by_uid(uid: str, filename: str) -> bytes | None:
+def fetch_attachment_content_by_uid(
+    uid: str,
+    filename: str,
+    timeout: int = DEFAULT_IMAP_TIMEOUT,
+) -> bytes | None:
     """Fetch a specific attachment payload from an email identified by its IMAP UID."""
     imap_server = os.getenv("EMAIL_IMAP_SERVER")
     email_address = os.getenv("EMAIL_ADDRESS")
     email_password = os.getenv("EMAIL_APP_PASSWORD")
     if not all([imap_server, email_address, email_password]):
         raise ValueError("Missing IMAP environment configuration.")
-    with IMAPClient(imap_server, ssl=True) as client:
+    with IMAPClient(imap_server, ssl=True, timeout=timeout) as client:
         client.login(email_address, email_password)
         client.select_folder("INBOX", readonly=True)
         try:
@@ -172,30 +207,58 @@ def fetch_attachment_content_by_uid(uid: str, filename: str) -> bytes | None:
                     return part.get_payload(decode=True)
     return None
 
-def extract_pdf_text(pdf_bytes: bytes) -> str:
-    """Extract all text from PDF bytes without page or character limits."""
-    from io import BytesIO
-    from pypdf import PdfReader
+def extract_pdf_text(
+    pdf_bytes: bytes,
+    max_pages: int = DEFAULT_MAX_PDF_PAGES,
+    max_chars: int = DEFAULT_MAX_PDF_CHARS,
+    max_bytes: int = DEFAULT_MAX_PDF_SIZE_BYTES,
+) -> str:
+    """Extract text from PDF bytes with page, character, and size limits (SEC-05)."""
+    if len(pdf_bytes) > max_bytes:
+        raise ValueError(
+            f"PDF file size ({len(pdf_bytes)} bytes) exceeds maximum allowed limit ({max_bytes} bytes)."
+        )
 
-    reader = PdfReader(BytesIO(pdf_bytes))
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes))
+    except Exception as e:
+        logger.error("Failed to parse PDF bytes: %s", e)
+        return ""
+
     text_parts = []
-    for page in reader.pages:
+    total_chars = 0
+    for page_idx, page in enumerate(reader.pages):
+        if max_pages is not None and max_pages > 0 and page_idx >= max_pages:
+            logger.warning("Reached maximum page limit (%d) for PDF extraction", max_pages)
+            break
         try:
             txt = page.extract_text()
             if txt:
+                if max_chars is not None and max_chars > 0 and total_chars + len(txt) > max_chars:
+                    remaining = max(0, max_chars - total_chars)
+                    if remaining > 0:
+                        text_parts.append(txt[:remaining])
+                        total_chars += remaining
+                    logger.warning("Reached maximum character limit (%d) for PDF extraction", max_chars)
+                    break
                 text_parts.append(txt)
-        except Exception:
+                total_chars += len(txt)
+        except Exception as page_err:
+            logger.warning("Failed to extract text from PDF page %d: %s", page_idx, page_err)
             continue
     return " ".join(text_parts)
 
-def mark_emails_as_read(uids: list[int]) -> None:
+def mark_emails_as_read(
+    uids: list[int],
+    timeout: int = DEFAULT_IMAP_TIMEOUT,
+) -> None:
     """Mark the given email UIDs as \\Seen in the IMAP INBOX."""
     imap_server = os.getenv("EMAIL_IMAP_SERVER")
     email_address = os.getenv("EMAIL_ADDRESS")
     email_password = os.getenv("EMAIL_APP_PASSWORD")
     if not all([imap_server, email_address, email_password]):
         raise ValueError("Missing IMAP environment configuration.")
-    with IMAPClient(imap_server, ssl=True) as client:
+    with IMAPClient(imap_server, ssl=True, timeout=timeout) as client:
         client.login(email_address, email_password)
         client.select_folder("INBOX")
         client.add_flags(uids, [b"\\Seen"])
@@ -273,7 +336,7 @@ if __name__ == "__main__":
                 raise ValueError("Missing IMAP environment configuration.")
                 
             print(f"Connecting to IMAP server to fetch email UID {uid}...")
-            with IMAPClient(imap_server, ssl=True) as client:
+            with IMAPClient(imap_server, ssl=True, timeout=DEFAULT_IMAP_TIMEOUT) as client:
                 client.login(email_address, email_password)
                 client.select_folder("INBOX", readonly=True)
                 resp = client.fetch([uid_int], ["RFC822"])
