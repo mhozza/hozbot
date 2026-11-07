@@ -12,7 +12,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 from pydantic_ai import Agent, RunContext, BinaryContent
 from pydantic_ai.exceptions import ModelHTTPError
-from telegram import Update, Message, Bot, LinkPreviewOptions
+from telegram import Update, Message, Bot, LinkPreviewOptions, constants
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, Defaults
 from telegram_utils import sanitize_telegram_html
 import agent_email
@@ -845,6 +845,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     global _pending_attachment
     _pending_attachment = None
 
+    # Defense-in-depth: only operate in private 1-on-1 chats to avoid leaking confidential data to groups
+    chat = update.effective_chat
+    if not chat or (chat.type != constants.ChatType.PRIVATE and chat.type != "private"):
+        logger.warning(
+            f"Non-private chat {getattr(chat, 'id', 'Unknown')} "
+            f"(type: {getattr(chat, 'type', None)}) tried to send a message. Dropping immediately."
+        )
+        return
+
     # Strict ID whitelist check - drop unauthorized traffic silently
     if not update.effective_user or update.effective_user.id not in ALLOWED_USER_IDS:
         logger.warning(
@@ -928,6 +937,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await safe_reply(update.message, "Sorry, an error occurred while processing your request.")
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Defense-in-depth: only operate in private 1-on-1 chats to avoid leaking confidential data to groups
+    chat = update.effective_chat
+    if not chat or (chat.type != constants.ChatType.PRIVATE and chat.type != "private"):
+        logger.warning(
+            f"Non-private chat {getattr(chat, 'id', 'Unknown')} "
+            f"(type: {getattr(chat, 'type', None)}) tried to use /start. Dropping immediately."
+        )
+        return
+
     # Strict ID whitelist check - drop unauthorized traffic silently
     if not update.effective_user or update.effective_user.id not in ALLOWED_USER_IDS:
         return
@@ -1330,6 +1348,19 @@ async def shutdown_bye_job(app: Application) -> None:
             logger.error(f"Failed to send shutdown message to user {uid}: {e}")
 
 
+def register_handlers(application: Application) -> None:
+    """Register command and message handlers with strict private-chat filters."""
+    application.add_handler(CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE))
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE
+            & (filters.TEXT | filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF)
+            & ~filters.COMMAND,
+            handle_message,
+        )
+    )
+
+
 def main() -> None:
     configure_logging()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -1377,9 +1408,8 @@ def main() -> None:
     global _telegram_bot
     _telegram_bot = application.bot
 
-    # Handlers
-    application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF) & ~filters.COMMAND, handle_message))
+    # Handlers (strictly enforce private 1-on-1 chat to prevent data leakage in groups)
+    register_handlers(application)
 
     # Schedule recurring jobs
     if os.getenv("EMAIL_CHECK_ENABLED", "true").lower() == "true":
