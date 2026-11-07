@@ -33,7 +33,7 @@ The Dockerfile uses a multi-stage build with `ghcr.io/astral-sh/uv:python3.13-al
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 | `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs (whitelist) |
 | `GOOGLE_API_KEY` | Google AI API key (for Gemini) |
-| `GOOGLE_CALENDAR_CREDENTIALS_FILE` | Path to Google Calendar OAuth client secrets JSON (default: `credentials.json`) |
+| `GOOGLE_CALENDAR_CREDENTIALS_FILE` | Path to Google Calendar OAuth client secrets JSON (default: `storage/credentials.json`) |
 | `GOOGLE_CALENDAR_TOKEN_FILE` | Path to stored Google Calendar OAuth token (default: `storage/google_calendar_token.json`) |
 | `EMAIL_IMAP_SERVER` | IMAP server (e.g. imap.gmail.com) |
 | `EMAIL_ADDRESS` | Email account address |
