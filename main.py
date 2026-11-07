@@ -55,6 +55,8 @@ SEND_DIGEST_ON_START = os.getenv("SEND_DIGEST_ON_START", "false").lower() == "tr
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
+DOWNLOADS_DIR = os.path.realpath(os.path.join(BASE_DIR, "downloads"))
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
 LAST_DIGEST_PATH = os.path.join(BASE_DIR, "storage", "last_digest.json")
 SKIPPED_EVENTS_PATH = os.path.join(BASE_DIR, "storage", "skipped_events.json")
@@ -594,6 +596,50 @@ def search_stored_emails(ctx: RunContext[FamilySystemContext], query: str, limit
         return f"Error searching emails: {str(e)}"
 
 
+def _resolve_download_path(file_path: str) -> str:
+    """Resolve file_path canonically and ensure it resides strictly within DOWNLOADS_DIR.
+
+    Raises ValueError if:
+    - Path is empty or whitespace
+    - Path resolves outside DOWNLOADS_DIR (directory traversal, absolute path outside, symlink outside)
+    - Path resolves to DOWNLOADS_DIR itself or any directory
+    """
+    if not file_path or not str(file_path).strip():
+        raise ValueError("File path cannot be empty.")
+
+    canonical_downloads = os.path.realpath(DOWNLOADS_DIR)
+    path_str = str(file_path).strip()
+
+    if os.path.isabs(path_str):
+        candidate = path_str
+    elif (
+        path_str.startswith("downloads/")
+        or path_str.startswith("downloads\\")
+        or path_str.startswith("./downloads/")
+        or path_str.startswith("./downloads\\")
+        or path_str == "downloads"
+        or path_str == "./downloads"
+    ):
+        candidate = os.path.join(BASE_DIR, path_str)
+    else:
+        candidate = os.path.join(canonical_downloads, path_str)
+
+    resolved = os.path.realpath(candidate)
+
+    try:
+        is_contained = os.path.commonpath([resolved, canonical_downloads]) == canonical_downloads
+    except ValueError:
+        is_contained = False
+
+    if not is_contained or resolved == canonical_downloads:
+        raise ValueError(f"Access denied: path '{file_path}' resolves outside authorized downloads directory.")
+
+    if os.path.isdir(resolved):
+        raise ValueError(f"Access denied: '{file_path}' is a directory, not a file.")
+
+    return resolved
+
+
 @agent.tool
 def download_attachment(ctx: RunContext[FamilySystemContext], uid: str, filename: str) -> str:
     """Download a specific attachment from an email by UID and filename, save it locally, and return the file path.
@@ -613,9 +659,8 @@ def download_attachment(ctx: RunContext[FamilySystemContext], uid: str, filename
         if data is None:
             return f"Attachment '{filename}' not found in email UID {uid}."
         safe_filename = os.path.basename(filename)
-        out_dir = os.path.join(os.path.dirname(__file__), "downloads")
-        os.makedirs(out_dir, exist_ok=True)
-        file_path = os.path.join(out_dir, f"{uid}_{safe_filename}")
+        os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+        file_path = os.path.join(DOWNLOADS_DIR, f"{uid}_{safe_filename}")
         with open(file_path, "wb") as f:
             f.write(data)
 
@@ -634,9 +679,21 @@ def download_attachment(ctx: RunContext[FamilySystemContext], uid: str, filename
 
 @agent.tool
 def extract_pdf_file(ctx: RunContext[FamilySystemContext], file_path: str) -> str:
-    """Extract all text from a PDF file at the given path."""
+    """Extract all text from a PDF file at the given path.
+    
+    The file must reside within the downloads directory.
+    """
     try:
-        with open(file_path, "rb") as f:
+        resolved_path = _resolve_download_path(file_path)
+    except ValueError as e:
+        logger.warning("Rejected extract_pdf_file path '%s': %s", file_path, e)
+        return f"Error: {str(e)}"
+
+    if not os.path.exists(resolved_path) or not os.path.isfile(resolved_path):
+        return f"File not found: {file_path}"
+
+    try:
+        with open(resolved_path, "rb") as f:
             pdf_bytes = f.read()
         text = extract_pdf_text(pdf_bytes)
         if not text:
@@ -652,6 +709,7 @@ async def send_file_to_chat(ctx: RunContext[FamilySystemContext], file_path: str
 
     Use this when the user asks to see or receive an attachment from an email.
     First use download_attachment to save the file, then use this tool to send it to the user.
+    The file must reside within the downloads directory.
 
     Args:
         file_path: Path to the file to send (as returned by download_attachment).
@@ -662,10 +720,18 @@ async def send_file_to_chat(ctx: RunContext[FamilySystemContext], file_path: str
     chat_id = ctx.deps.user_id
     if chat_id == 0:
         return "Error: Cannot send files in system context."
-    if not os.path.exists(file_path):
-        return f"File not found: {file_path}"
+
     try:
-        with open(file_path, "rb") as f:
+        resolved_path = _resolve_download_path(file_path)
+    except ValueError as e:
+        logger.warning("Rejected send_file_to_chat path '%s': %s", file_path, e)
+        return f"Error: {str(e)}"
+
+    if not os.path.exists(resolved_path) or not os.path.isfile(resolved_path):
+        return f"File not found: {file_path}"
+
+    try:
+        with open(resolved_path, "rb") as f:
             await _telegram_bot.send_document(
                 chat_id=chat_id,
                 document=f,
@@ -673,7 +739,7 @@ async def send_file_to_chat(ctx: RunContext[FamilySystemContext], file_path: str
                 read_timeout=30,
                 write_timeout=30,
             )
-        return f"Sent: {os.path.basename(file_path)}"
+        return f"Sent: {os.path.basename(resolved_path)}"
     except Exception as e:
         logger.error("Error sending file to chat: %s", e, exc_info=True)
         return f"Error sending file: {str(e)}"
