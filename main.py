@@ -290,6 +290,7 @@ from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
 from pydantic_ai.models.fallback import FallbackModel
+from pydantic_ai.settings import ModelSettings
 from google_calendar import GoogleCalendar, migrate_from_json, _parse_iso, LOCAL_TZ, LOCAL_TZ_NAME, _event_start_raw
 import database as db_mod
 import event_store
@@ -344,6 +345,7 @@ agent = Agent(
     model,
     deps_type=FamilySystemContext,
     capabilities=[Thinking(effort='low')],
+    model_settings=ModelSettings(timeout=45.0),
     system_prompt=SYSTEM_PROMPT,
 )
 
@@ -362,6 +364,7 @@ email_agent = Agent(
     model,
     deps_type=FamilySystemContext,
     capabilities=[Thinking(effort='low')],
+    model_settings=ModelSettings(timeout=45.0),
     system_prompt=EMAIL_AGENT_SYSTEM_PROMPT,
 )
 
