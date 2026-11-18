@@ -3,8 +3,8 @@
 ## Tech Stack
 - **Language**: Python 3.13+
 - **AI Framework**: `pydantic-ai-slim` (v1.102.0) with Google Gemini models
-  - Primary: `gemini-3.8-flash`
-  - Fallback: `gemini-3.7-flash`, `gemini-3.5-flash-lite`
+  - Chat & Digest: `gemini-4-hydrogen` (fallback: `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemma-4-31b-it`, `gemma-4-26b-a4b-it`)
+  - Email Check: `gemma-4-31b-it` (fallback: `gemini-3.5-flash-lite`, `gemma-4-26b-a4b-it`)
 - **Telegram**: `python-telegram-bot` v21.10
 - **Email**: `imapclient` v3.0.1 (IMAP + SSL)
 - **PDF**: `pypdf` v5.1.0

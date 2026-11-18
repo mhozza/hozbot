@@ -328,12 +328,22 @@ def _format_local_time(iso_str: str) -> str:
 
 # Initialize Google provider with API key from environment
 google_provider = GoogleProvider(api_key=os.getenv("GOOGLE_API_KEY"))
-# Initialize GoogleModel instances for primary and fallback
-primary_model = GoogleModel('gemini-3.8-flash', provider=google_provider)
-middle_model = GoogleModel('gemini-3.7-flash', provider=google_provider)
-fallback_model = GoogleModel('gemini-3.5-flash-lite', provider=google_provider)
+# Initialize GoogleModel instances for primary and fallbacks
+MODEL_NAMES = [
+    'gemini-4-hydrogen',
+    'gemini-3.8-flash',
+    'gemini-3.5-flash-lite',
+    'gemma-4-31b-it',
+    'gemma-4-26b-a4b-it',
+]
+EMAIL_MODEL_NAMES = [
+    'gemma-4-31b-it',
+    'gemini-3.5-flash-lite',
+    'gemma-4-26b-a4b-it',
+]
 # Use FallbackModel to try primary first, then fallbacks
-model = FallbackModel(primary_model, middle_model, fallback_model)
+model = FallbackModel(*(GoogleModel(name, provider=google_provider) for name in MODEL_NAMES))
+email_model = FallbackModel(*(GoogleModel(name, provider=google_provider) for name in EMAIL_MODEL_NAMES))
 
 # Load prompt templates
 SYSTEM_PROMPT = open(os.path.join(PROMPTS_DIR, "system_prompt.md")).read().strip()
@@ -361,7 +371,7 @@ EMAIL_AGENT_SYSTEM_PROMPT = (
     "Google Calendar, and surface urgent items."
 )
 email_agent = Agent(
-    model,
+    email_model,
     deps_type=FamilySystemContext,
     capabilities=[Thinking(effort='low')],
     model_settings=ModelSettings(timeout=45.0),

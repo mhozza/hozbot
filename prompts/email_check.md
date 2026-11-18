@@ -8,7 +8,7 @@ Dates in emails are in this timezone. When outputting ISO dates, you can include
 
 Analyze these emails and the extracted content from their attachments. Image attachments (PNG, JPEG, etc.) from the emails are included as visual content for you to examine directly. Follow these rules:
 
-1. Use get_profile to check our family profile for context on what's relevant.
+1. Use the Family Profile provided above for context on what's relevant (no need to call `get_profile`).
 2. For EVERY date, event, or deadline you find, store it in the local database:
    a. First, call list_email_events(date="YYYY-MM-DD", title="keyword", check_gcal=True) to check if the same real-world event already exists in the local database OR any shared Google Calendar.
    b. If an existing event matches (same date + same event, even if wording differs) in the local database, call update_email_event to merge the new info (title, time).
